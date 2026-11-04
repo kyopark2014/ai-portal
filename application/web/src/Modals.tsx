@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import * as api from "./api";
-import type { Item, Kind, Registry, User } from "./api";
+import type { Item, Kind, RegistryInfo, User } from "./api";
 import ConfirmDialog, { type ConfirmSpec } from "./ConfirmDialog";
 import McpTest from "./McpTest";
 import PromptTest from "./PromptTest";
@@ -131,12 +131,12 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
   const [desc, setDesc] = useState(item.description);
   const [msg, setMsg] = useState(""); const [err, setErr] = useState(""); const [busy, setBusy] = useState(false);
   const [out, setOut] = useState("");
-  const [regs, setRegs] = useState<{ list: Registry[]; selected: string } | null>(null);
+  const [reg, setReg] = useState<RegistryInfo | null>(null);
   const [ask, setAsk] = useState<ConfirmSpec | null>(null);
   const [pickReviewer, setPickReviewer] = useState(false);
   const d = item.data;
 
-  useEffect(() => { api.listRegistries().then((r) => setRegs({ list: r.registries, selected: r.selected })).catch(() => setRegs({ list: [], selected: "" })); }, []);
+  useEffect(() => { api.registryInfo().then(setReg).catch(() => setReg({ registry_id: "", name: "", status: "", authorizer: "", auto_approval: null })); }, []);
 
   async function run<T>(fn: () => Promise<T>, ok?: (r: T) => void) {
     setBusy(true); setErr(""); setMsg("");
@@ -236,10 +236,10 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
             {item.can_edit && item.registry_status === "DRAFT" && <button className="btn" disabled={busy}
               onClick={() => run(() => api.submitRegistry(item.kind, item.id), (i) => { upd(i); setMsg("승인 요청을 보냈습니다. 관리자와 이 record 의 reviewer 가 승인할 수 있습니다."); })}>승인 요청</button>}
           </div></div>
-        ) : regs && !regs.selected ? (
-          <p className="hint">사용할 Registry가 선택되지 않았습니다. {user.role === "admin" ? "아래에서 선택하세요." : "관리자가 선택해야 등록할 수 있습니다."}</p>
+        ) : reg && !reg.registry_id ? (
+          <p className="hint">연결된 Registry가 없습니다. 설치(<code>installer.py</code>)로 Registry를 먼저 만들어야 합니다.</p>
         ) : item.can_edit ? (
-          <button className="btn" disabled={busy || !regs} onClick={() => run(() => api.registerItem(item.kind, item.id), (i) => { upd(i); setMsg("Registry에 DRAFT로 등록했습니다."); })}>Registry 등록 다시 시도</button>
+          <button className="btn" disabled={busy || !reg} onClick={() => run(() => api.registerItem(item.kind, item.id), (i) => { upd(i); setMsg("Registry에 DRAFT로 등록했습니다."); })}>Registry 등록 다시 시도</button>
         ) : null}
 
         {user.role === "admin" && item.registry_record_id && (
@@ -247,12 +247,7 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
             <span className="hint">이 record 만 승인할 수 있는 사람을 추가합니다.</span></div>)}
         {pickReviewer && <ReviewerPicker item={item} onClose={() => setPickReviewer(false)} />}
 
-        {user.role === "admin" && regs && (<fieldset className="grp"><legend>Registry 선택 (관리자)</legend>
-          {regs.list.length === 0 ? <p className="hint">Registry가 없습니다.</p> :
-            <select value={regs.selected} onChange={(e) => run(() => api.selectRegistry(e.target.value), () => setRegs({ ...regs, selected: e.target.value }))}>
-              <option value="">선택…</option>{regs.list.map((r) => <option key={r.registryId} value={r.registryId}>{r.name} ({r.status})</option>)}</select>}
-          <NewRegistry onCreated={() => api.listRegistries().then((r) => setRegs({ list: r.registries, selected: r.selected }))} />
-        </fieldset>)}
+
 
         {msg && <p className="note ok" role="status">{msg}</p>}
         {err && <p className="note error" role="alert">{err}</p>}
@@ -271,13 +266,4 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
       {ask && <ConfirmDialog spec={ask} onClose={() => setAsk(null)} />}
     </Modal>
   );
-}
-
-function NewRegistry({ onCreated }: { onCreated: () => void }) {
-  const [name, setName] = useState(""); const [auto, setAuto] = useState(false); const [err, setErr] = useState("");
-  return (<div className="row" style={{ marginTop: ".6rem" }}>
-    <input aria-label="새 Registry 이름" placeholder="새 Registry 이름 (영문/숫자/_)" value={name} onChange={(e) => setName(e.target.value)} />
-    <label className="chk"><input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} /> auto-approval</label>
-    <button type="button" className="btn ghost" disabled={!name} onClick={async () => { setErr(""); try { await api.createRegistry({ name, auto_approval: auto }); setName(""); onCreated(); } catch (e: any) { setErr(e.message); } }}>생성</button>
-    {err && <span className="note error">{err}</span>}</div>);
 }

@@ -24,7 +24,7 @@ export interface Item {
   registry_id: string | null; registry_record_id: string | null; registry_status: string | null;
   created_at: number; updated_at: number; registry_error?: string;
 }
-export interface Registry { registryId: string; name: string; status: string; authorizerType: string }
+export interface RegistryInfo { registry_id: string; name: string; status: string; authorizer: string; auto_approval: boolean | null }
 const json = (method: string, body?: unknown): RequestInit => ({
   method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body),
 });
@@ -46,9 +46,6 @@ export const setDescription = (kind: Kind, id: number, description: string) => c
 export const remove = (kind: Kind, id: number) => callErr<{ ok: boolean }>(`/api/catalog/${kind}/${id}`, json("DELETE"));
 export const getSync = () => callErr<{ running: boolean; last: number | null; error: string; added: Record<string, number> }>("/api/sync");
 export const syncNow = () => callErr<{ started: boolean }>("/api/sync", json("POST"));
-export const listRegistries = () => callErr<{ registries: Registry[]; selected: string }>("/api/registries");
-export const selectRegistry = (registry_id: string) => callErr<unknown>("/api/registries/selected", json("PUT", { registry_id }));
-export const createRegistry = (body: unknown) => callErr<unknown>("/api/registries", json("POST", body));
 export const registerItem = (kind: Kind, id: number) => callErr<Item>(`/api/catalog/${kind}/${id}/register`, json("POST"));
 export const refreshRegistry = (kind: Kind, id: number) => callErr<Item & { registry_reason: string }>(`/api/catalog/${kind}/${id}/registry/refresh`, json("POST"));
 export const submitRegistry = (kind: Kind, id: number) => callErr<Item>(`/api/catalog/${kind}/${id}/registry/submit`, json("POST"));
@@ -175,7 +172,6 @@ export interface Dashboard {
 }
 export const adminDashboard = () => callErr<Dashboard>("/api/admin/dashboard");
 export const myRecordsAll = () => callErr<{ items: Item[]; counts: Record<string, number>; total: number }>("/api/my/records?scope=all");
-export const registryDefaults = () => callErr<{ authorizer: "AWS_IAM" | "CUSTOM_JWT"; auto_approval: boolean }>("/api/registries/defaults");
 
 // ── record 별 reviewer (관리자 전용) ──
 export interface PickUser { email: string; name: string; is_admin: boolean; last_login: number | null }
@@ -185,3 +181,5 @@ export const getReviewers = (recordId: string) => callErr<{ reviewers: string[] 
 export const addReviewer = (record_id: string, email: string) => callErr<{ reviewers: string[] }>("/api/reviewers", json("POST", { record_id, email }));
 export const removeReviewer = (record_id: string, email: string) =>
   callErr<{ reviewers: string[] }>(`/api/reviewers?record_id=${encodeURIComponent(record_id)}&email=${encodeURIComponent(email)}`, json("DELETE"));
+
+export const registryInfo = () => callErr<RegistryInfo>("/api/registry");

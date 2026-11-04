@@ -117,34 +117,37 @@ def test_all_scope_still_masks_headers(env):
     assert "SECRET" not in client(ADMIN).get("/api/my/records?scope=all").text
 
 
-# ── 4) Registry 생성 기본값 ──
-def test_registry_defaults_are_iam_and_no_auto_approval(env):
-    assert client(USER).get("/api/registries/defaults").json() == {"authorizer": "AWS_IAM", "auto_approval": False}
-    seen = {}
-    class C:
-        def create_registry(self, **kw): seen.update(kw); return {"registryArn": "arn:x"}
-    import application.aws as a
-    a_orig = a.registry_client; a.registry_client = lambda: C()
-    try:
-        assert client(ADMIN).post("/api/registries", json={"name": "r1"}).status_code == 200
-    finally:
-        a.registry_client = a_orig
-    assert seen["authorizerType"] == "AWS_IAM" and seen["approvalConfiguration"] == {"autoApproval": False} and "authorizerConfiguration" not in seen
+# ── Registry 는 설치 때 만든 하나로 고정: 생성·선택·목록 API 가 없다 ──
+def test_registry_cannot_be_created_listed_or_switched_from_the_api(env):
+    for who in (ADMIN, USER):                                                                                   # 관리자도 불가
+        c = client(who)
+        assert c.post("/api/registries", json={"name": "x"}).status_code in (404, 405)
+        assert c.put("/api/registries/selected", json={"registry_id": "other"}).status_code in (404, 405)
+        assert c.get("/api/registries").status_code == 404 and c.get("/api/registries/defaults").status_code == 404
 
 
-def test_jwt_registry_requires_a_discovery_url_and_non_admins_cannot_create(env, monkeypatch):
-    seen = {}
+def test_registry_is_pinned_to_the_installed_one_and_ignores_stored_settings(env, monkeypatch):
+    db.set_setting("registry_id", "SOMETHING_ELSE")                                                             # 예전에 화면에서 골랐던 값이 남아 있어도
+    assert catalog.selected_registry() == "REG"                                                                 # 환경 변수(설치 값)를 쓴다
+    monkeypatch.delenv("REGISTRY_ID"); monkeypatch.setattr(catalog, "_config_registry", lambda: "FROM_CONFIG")
+    assert catalog.selected_registry() == "FROM_CONFIG"
+
+
+def test_registry_info_is_read_only_and_reports_the_fixed_registry(env, monkeypatch):
     class C:
-        def create_registry(self, **kw): seen.update(kw); return {"registryArn": "arn:x"}
+        def get_registry(self, registryId):
+            assert registryId == "REG"
+            return {"name": "ai-portal", "status": "READY", "authorizerType": "AWS_IAM", "approvalConfiguration": {"autoApproval": False}}
     monkeypatch.setattr(aws, "registry_client", lambda: C())
-    a = client(ADMIN)
-    assert a.post("/api/registries", json={"name": "j", "authorizer": "CUSTOM_JWT"}).status_code == 422          # URL 없음
-    assert a.post("/api/registries", json={"name": "j", "authorizer": "CUSTOM_JWT", "jwt_discovery_url": "file:///etc/x"}).status_code == 422
-    ok = a.post("/api/registries", json={"name": "j", "authorizer": "CUSTOM_JWT", "auto_approval": True,
-                                         "jwt_discovery_url": "https://idp.example/.well-known/openid-configuration", "jwt_allowed_clients": ["c1"]})
-    assert ok.status_code == 200 and seen["authorizerConfiguration"]["customJWTAuthorizer"] == {
-        "discoveryUrl": "https://idp.example/.well-known/openid-configuration", "allowedClients": ["c1"]}
-    assert client(USER).post("/api/registries", json={"name": "x"}).status_code == 403
+    r = client(USER).get("/api/registry").json()
+    assert r == {"registry_id": "REG", "name": "ai-portal", "status": "READY", "authorizer": "AWS_IAM", "auto_approval": False}
+    assert client(ADMIN).post("/api/registry", json={}).status_code == 405 and client(ADMIN).put("/api/registry", json={}).status_code == 405
+    assert TestClient(server.app).get("/api/registry").status_code == 401
+
+
+def test_registry_info_without_a_registry_is_empty_not_an_error(env, monkeypatch):
+    monkeypatch.delenv("REGISTRY_ID"); monkeypatch.setattr(catalog, "_config_registry", lambda: "")
+    assert client(USER).get("/api/registry").json()["registry_id"] == ""
 
 
 # ── 1) harness 설명 ──

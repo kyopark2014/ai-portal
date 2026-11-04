@@ -570,23 +570,10 @@ def sync_now(user: auth.User = Depends(auth.current_user)):
 
 
 # ── Registry (CreateRegistryRecord 로 등록정보 관리) ──
-# 새 Registry 의 기본값. 인증은 IAM, auto-approval 은 꺼짐(수동 승인).
-REGISTRY_DEFAULTS = {"authorizer": "AWS_IAM", "auto_approval": False}
-
-
-class RegistryIn(BaseModel):
-    name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z][A-Za-z0-9_]*$")
-    description: str = Field("", max_length=1000)
-    authorizer: Literal["AWS_IAM", "CUSTOM_JWT"] = REGISTRY_DEFAULTS["authorizer"]
-    jwt_discovery_url: str = Field("", max_length=2000)        # CUSTOM_JWT 일 때 필수 (OIDC discovery URL)
-    jwt_allowed_audience: list[str] = Field(default_factory=list, max_length=20)
-    jwt_allowed_clients: list[str] = Field(default_factory=list, max_length=20)
-    auto_approval: bool = REGISTRY_DEFAULTS["auto_approval"]
-
-
 def selected_registry() -> str:
-    """관리자가 고른 값 > 설치 시 만든 ai-portal Registry(config.json / env) 순."""
-    return db.get_setting("registry_id") or os.environ.get("REGISTRY_ID", "") or _config_registry()
+    """이 포털이 쓰는 Registry. 설치 때 만든 `ai-portal` 하나로 고정이며(환경 변수 REGISTRY_ID, 없으면 config.json),
+    화면·API 로 바꿀 수 없다 — 승인 대상이 엉뚱한 Registry 로 바뀌는 것을 막는다."""
+    return os.environ.get("REGISTRY_ID", "") or _config_registry()
 
 
 def config_value(key: str) -> str:
@@ -600,52 +587,19 @@ def _config_registry() -> str:
     return config_value("registry_id")
 
 
-@router.get("/registries")
-def list_registries(user: auth.User = Depends(auth.current_user)):
+@router.get("/registry")
+def registry_info(user: auth.User = Depends(auth.current_user)):
+    """이 포털이 쓰는 Registry(읽기 전용). 생성·변경 API 는 없다 — 설치기(installer.py)가 만든 `ai-portal` 하나로 고정이다."""
+    rid = selected_registry()
+    if not rid:
+        return {"registry_id": "", "name": "", "status": "", "authorizer": "", "auto_approval": None}
     try:
-        regs = aws.registry_client().list_registries().get("registries", [])
+        g = aws.registry_client().get_registry(registryId=rid)
     except (ClientError, BotoCoreError) as e:
         raise aws_err(e)
-    return {"registries": [{k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in r.items()} for r in regs],
-            "selected": selected_registry()}
-
-
-@router.get("/registries/defaults")
-def registry_defaults(user: auth.User = Depends(auth.current_user)):
-    return REGISTRY_DEFAULTS
-
-
-@router.post("/registries")
-def create_registry(body: RegistryIn, user: auth.User = Depends(auth.current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "admin only")
-    kw: dict[str, Any] = {"name": body.name, "description": body.description or body.name,
-                          "authorizerType": body.authorizer, "approvalConfiguration": {"autoApproval": body.auto_approval}}
-    if body.authorizer == "CUSTOM_JWT":
-        _check_url(body.jwt_discovery_url, "jwt_discovery_url")           # discoveryUrl 은 필수이며 http(s) URL 이어야 한다
-        jwt: dict[str, Any] = {"discoveryUrl": body.jwt_discovery_url}
-        if body.jwt_allowed_audience:
-            jwt["allowedAudience"] = body.jwt_allowed_audience
-        if body.jwt_allowed_clients:
-            jwt["allowedClients"] = body.jwt_allowed_clients
-        kw["authorizerConfiguration"] = {"customJWTAuthorizer": jwt}
-    try:
-        r = aws.registry_client().create_registry(**kw)
-    except (ClientError, BotoCoreError) as e:
-        raise aws_err(e)
-    return {"registryArn": r["registryArn"], "authorizer": body.authorizer, "auto_approval": body.auto_approval}
-
-
-class SelectIn(BaseModel):
-    registry_id: str
-
-
-@router.put("/registries/selected")
-def select_registry(body: SelectIn, user: auth.User = Depends(auth.current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "admin only")
-    db.set_setting("registry_id", body.registry_id)
-    return {"selected": body.registry_id}
+    return {"registry_id": rid, "name": g.get("name", ""), "status": g.get("status", ""),
+            "authorizer": g.get("authorizerType", ""),
+            "auto_approval": (g.get("approvalConfiguration") or {}).get("autoApproval")}
 
 
 def _register_core(item_id: int) -> None:

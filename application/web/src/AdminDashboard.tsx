@@ -82,65 +82,31 @@ export default function AdminDashboard() {
               <li key={i}><span className="mono">{l.email}</span>{l.name && <span className="hint">{l.name}</span>}<span className="hint" style={{ marginLeft: "auto" }} title={when(l.logged_at)}>{ago(l.logged_at)}</span></li>))}</ul>)}
         </section>
 
-        <RegistryDefaults />
+        <RegistryCard />
       </>)}
     </section>
   );
 }
 
-/** Registry 관리: 새 Registry 의 기본값(IAM 인증, auto-approval 꺼짐)을 서버에서 받아 폼 초기값으로 쓴다. */
-function RegistryDefaults() {
-  const [def, setDef] = useState<{ authorizer: string; auto_approval: boolean } | null>(null);
-  const [regs, setRegs] = useState<api.Registry[]>([]);
-  const [selected, setSelected] = useState("");
-  const [f, setF] = useState({ name: "", authorizer: "AWS_IAM", auto: false, url: "", aud: "", clients: "" });
-  const [busy, setBusy] = useState(false); const [err, setErr] = useState(""); const [msg, setMsg] = useState("");
-
-  const reload = () => api.listRegistries().then((r) => { setRegs(r.registries); setSelected(r.selected); }).catch((e) => setErr(e.message));
-  useEffect(() => {
-    api.registryDefaults().then((x) => { setDef(x); setF((p) => ({ ...p, authorizer: x.authorizer, auto: x.auto_approval })); }).catch(() => {});
-    reload();
-  }, []);
-  const csv = (v: string) => v.split(",").map((x) => x.trim()).filter(Boolean);
-
-  async function create(e: React.FormEvent) {
-    e.preventDefault(); setBusy(true); setErr(""); setMsg("");
-    try {
-      await api.createRegistry({ name: f.name, authorizer: f.authorizer, auto_approval: f.auto, jwt_discovery_url: f.url,
-        jwt_allowed_audience: csv(f.aud), jwt_allowed_clients: csv(f.clients) });
-      setMsg(`Registry "${f.name}" 을(를) 만들었습니다.`); setF((p) => ({ ...p, name: "" })); reload();
-    } catch (x: any) { setErr(x.message); }
-    setBusy(false);
-  }
-
+/** 이 포털이 쓰는 Registry(읽기 전용). 생성·변경 UI 는 두지 않는다 — 설치기가 만든 `ai-portal` 하나로 고정이다. */
+function RegistryCard() {
+  const [r, setR] = useState<api.RegistryInfo | null>(null);
+  const [err, setErr] = useState("");
+  useEffect(() => { api.registryInfo().then(setR).catch((e) => setErr(e.message)); }, []);
   return (
     <section className="card" aria-labelledby="ad-regmgr">
-      <h2 id="ad-regmgr">레지스트리 관리</h2>
-      <label className="field"><span className="lbl">사용할 Registry</span>
-        <select value={selected} disabled={busy} onChange={(e) => api.selectRegistry(e.target.value).then(() => setSelected(e.target.value)).catch((x) => setErr(x.message))}>
-          <option value="">선택…</option>{regs.map((r) => <option key={r.registryId} value={r.registryId}>{r.name} · {r.authorizerType} · {r.status}</option>)}</select></label>
-
-      <form className="form" onSubmit={create}>
-        <h3>새 Registry 만들기</h3>
-        <p className="hint">기본값: 인증 <b>{def?.authorizer === "AWS_IAM" ? "IAM" : def?.authorizer ?? "IAM"}</b>, auto-approval <b>{def?.auto_approval ? "켜짐" : "꺼짐"}</b> (수동 승인).</p>
-        <label className="field"><span className="lbl">이름</span><input required pattern="[A-Za-z][A-Za-z0-9_]*" placeholder="영문으로 시작, 영문/숫자/_" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></label>
-        <div className="row2">
-          <label className="field"><span className="lbl">인증 방식</span>
-            <select value={f.authorizer} onChange={(e) => setF({ ...f, authorizer: e.target.value })}>
-              <option value="AWS_IAM">IAM (기본)</option><option value="CUSTOM_JWT">JWT (OIDC)</option></select></label>
-          <label className="field"><span className="lbl">Auto-approval</span>
-            <select value={String(f.auto)} onChange={(e) => setF({ ...f, auto: e.target.value === "true" })}>
-              <option value="false">끔 — 수동 승인 (기본)</option><option value="true">켬 — 승인 없이 바로 검색 가능</option></select></label>
-        </div>
-        {f.auto && <p className="note error">auto-approval 을 켜면 등록 즉시 검색에 노출됩니다. 검토 절차가 사라지니 신중히 선택하세요.</p>}
-        {f.authorizer === "CUSTOM_JWT" && (<fieldset className="grp"><legend>JWT 설정</legend>
-          <label className="field"><span className="lbl">OIDC Discovery URL (필수)</span><input required type="url" placeholder="https://…/.well-known/openid-configuration" value={f.url} onChange={(e) => setF({ ...f, url: e.target.value })} /></label>
-          <label className="field"><span className="lbl">Allowed audience (쉼표 구분, 선택)</span><input value={f.aud} onChange={(e) => setF({ ...f, aud: e.target.value })} /></label>
-          <label className="field"><span className="lbl">Allowed clients (쉼표 구분, 선택)</span><input value={f.clients} onChange={(e) => setF({ ...f, clients: e.target.value })} /></label></fieldset>)}
-        <div className="actions"><button className="btn" disabled={busy || !f.name}>{busy ? "만드는 중…" : "Registry 생성"}</button></div>
-      </form>
-      {msg && <p className="note ok" role="status">{msg}</p>}
+      <h2 id="ad-regmgr">연결된 Registry</h2>
       {err && <p className="note error" role="alert">{err}</p>}
+      {!r && !err && <p className="sub">불러오는 중…</p>}
+      {r && (r.registry_id ? (
+        <dl className="kv">
+          <div><dt>이름</dt><dd>{r.name}</dd></div>
+          <div><dt>상태</dt><dd>{r.status}</dd></div>
+          <div><dt>인증 방식</dt><dd>{r.authorizer === "AWS_IAM" ? "IAM" : r.authorizer}</dd></div>
+          <div><dt>Auto-approval</dt><dd>{r.auto_approval ? "켜짐" : "꺼짐 (수동 승인)"}</dd></div>
+          <div className="wide-row"><dt>Registry ID</dt><dd className="mono sm arn">{r.registry_id}</dd></div>
+        </dl>) : <p className="sub">연결된 Registry가 없습니다. <code>python installer.py</code> 로 만드세요.</p>)}
+      <p className="hint">이 포털은 설치 때 만든 Registry 하나만 사용합니다. 인증 방식과 auto-approval 은 Registry 생성 시 정해지며 여기서 바꾸지 않습니다.</p>
     </section>
   );
 }

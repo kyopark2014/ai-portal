@@ -139,13 +139,13 @@ cp .env.example .env     # GOOGLE_CLIENT_ID, LLM_GATEWAY_KEY 등 입력
 - **reviewer (record 별 승인 권한)**: **관리자는 항상 모든 record 를 승인**할 수 있고, 관리자가 record 마다 **reviewer 를 추가**하면 그 사람은 **그 record 만** 승인·거절할 수 있습니다(요청자는 승인자를 고르지 않습니다). 관리자는 Prompt/MCP/Skill/Agent 카드 메뉴(또는 목록, 상세 화면)의 **Add reviewer**에서 사용자를 **이메일·이름으로 검색**해 고릅니다(서버가 매 입력마다 검색해 일부만 내려주므로 사용자가 많아도 동작). reviewer 는 승인 메뉴에서 자기에게 지정된 record 만 보이고(그 외는 404), Deprecate·reviewer/관리자 관리·대시보드는 쓸 수 없습니다. reviewer 정보는 SSM `/ai-portal/reviewers` 에 저장되어 재배포 후에도 유지되며, SSM 을 읽지 못하면 reviewer 권한은 인정하지 않고 관리자만 승인합니다(fail closed). record 가 삭제·취소되면 그 reviewer 정보도 정리됩니다. 종류 단위(예: Skill 전체) reviewer 는 없고 record 별로만 지정합니다.
 - **관리자 관리**: 승인 메뉴의 "승인자 관리" 탭(관리자만)에서 **관리자**를 추가·제거합니다(바로 반영, 재배포 불필요). 최초 관리자(`ADMIN_EMAILS`)와 자기 자신은 지울 수 없습니다. 목록은 컨테이너 DB 가 아니라 **SSM Parameter Store**(`/ai-portal/admins`)에 저장되며, SSM 을 읽지 못하면 최초 관리자만 관리자로 인정합니다(fail closed).
 - **내 레코드**: "내 정보"에서 내가 만든 항목을 종류·Registry 상태별로 봅니다(승인 대기·거절·초안 포함, 상태 필터, Open 으로 상세). 관리자는 "내 것 / 전체" 를 전환해 모든 사용자의 항목(소유자 포함)을 볼 수 있고, 일반 사용자의 `scope=all` 요청은 403 입니다.
-- **관리 대시보드(관리자)**: "관리" 메뉴. ① 접속 통계(접속한 사용자·최근 7일 활성·총 로그인) ② **Registry 등록 현황** — type(Prompt/MCP/Skill/Agent)별 승인·진행 상태 개수(AWS Registry 를 직접 조회) ③ **사용자 표** — 로그인 횟수·마지막 접속·소유한 항목을 type 별·상태별로 ④ 최근 접속 ⑤ 레지스트리 관리(Registry 선택, 새 Registry 생성). 접속 기록은 **이메일·이름·시각만** 저장하고(프로필 사진 URL 은 저장 안 함) DynamoDB 에 있어 재배포해도 유지됩니다.
-- **Registry 생성 기본값**: 인증 **IAM**, auto-approval **꺼짐**(수동 승인). 화면에서 JWT(OIDC discovery URL 필수) 나 auto-approval 켜기도 고를 수 있고, 켜면 경고가 나옵니다.
+- **관리 대시보드(관리자)**: "관리" 메뉴. ① 접속 통계(접속한 사용자·최근 7일 활성·총 로그인) ② **Registry 등록 현황** — type(Prompt/MCP/Skill/Agent)별 승인·진행 상태 개수(AWS Registry 를 직접 조회) ③ **사용자 표** — 로그인 횟수·마지막 접속·소유한 항목을 type 별·상태별로 ④ 최근 접속 ⑤ **연결된 Registry**(이름·상태·인증 방식·auto-approval, 읽기 전용). 접속 기록은 **이메일·이름·시각만** 저장하고(프로필 사진 URL 은 저장 안 함) DynamoDB 에 있어 재배포해도 유지됩니다.
+- **Registry 는 하나로 고정**: 이 포털은 설치기(`installer.py`)가 만든 `ai-portal` Registry 하나만 씁니다(`REGISTRY_ID` 환경 변수, 없으면 `config.json`). 화면과 API 어디에도 Registry 를 **만들거나·목록으로 보거나·바꾸는** 기능이 없고(관리자도 불가), 예전에 화면에서 골랐던 설정값이 남아 있어도 무시합니다. 인증 방식(IAM)과 auto-approval(꺼짐)은 설치 때 정해집니다. 관리 화면은 현재 연결된 Registry 를 읽기 전용(`GET /api/registry`)으로만 보여줍니다.
 - **승인(관리자)**: 상단 "승인" 메뉴 또는 메일 링크(`/approvals/<recordId>`). Registry 를 직접 조회해 대기·승인됨·거절됨·Deprecated 탭으로 보고, record 내용을 검토한 뒤 승인/거절(사유 필수)/Deprecate 합니다. AWS 의 현재 상태를 확인하고 처리해 이중 처리를 막으며(409), 사유에 처리자 이메일(`[by …]`)을 남깁니다. 일반 사용자는 403.
 - **삭제**: Registry record → Prompt Management → 포털 DB 순. record 가 `CREATING` 이면 409(등록 직후 몇 초간 삭제 불가). AWS 동기화 항목은 포털 목록에서만 지워짐.
 - **Registry 기반 복원**: 동기화 마지막 단계(`sync_registry`)가 Registry 의 record 를 읽어 포털 항목과 연결합니다. DB 가 비어 있어도(재배포·신규 서버) 복구되며, 승인 상태도 Registry 에서 가져옵니다. prompt(Prompt Management 포인터)·skill(Git/S3 출처)·agent(ARN)·MCP(URL)를 record 내용에서 복원합니다. 같은 대상의 동기화 항목(prompt·agent·Gateway)이 있으면 그 항목에 연결하고(중복 생성 안 함), 없으면 새로 만듭니다. 이미 연결된 항목은 상태만 갱신하며 사용자가 고친 설명은 덮어쓰지 않습니다. `CREATING`/`UPDATING` 중인 record 와 포털이 만들지 않은 형식의 record 는 건너뜁니다. **복원되지 않는 것**: MCP 의 HTTP 헤더(Registry 에 저장하지 않음), 원래 소유자(→ 소유자 `registry`, 관리자만 수정·삭제).
 - **가시성**: 관리자는 모든 항목을 봅니다. **일반 사용자는 자기가 만든 항목과 Registry 에서 승인(APPROVED)된 항목만** 봅니다(거절·deprecated 된 남의 항목은 숨김, 내가 만든 항목은 상태와 무관하게 보임). 목록·검색뿐 아니라 ID 로 접근하는 모든 API(수정·삭제·등록·테스트 등)에 같은 규칙을 적용하며, 숨겨진 항목은 403 이 아니라 404 로 응답해 존재 여부를 알리지 않습니다. 승인된 남의 항목은 보고 테스트에 쓸 수 있지만 수정·삭제는 불가.
-- **권한**: 수정·삭제·등록은 소유자 또는 관리자. Registry 생성·선택은 관리자만.
+- **권한**: 수정·삭제·등록은 소유자 또는 관리자.
 
 ## AWS 리소스 (`installer.py`)
 ```bash
@@ -172,7 +172,6 @@ python installer.py --skip-docker-build    # 이미지 재빌드 없이
 | `POST /api/prompts` · `PUT /api/prompts/{id}` · `POST …/{id}/refresh` | Prompt (Bedrock 저장·수정·재조회) |
 | `POST /api/mcp` · `POST /api/mcp/{id}/test` · `POST /api/skills` · `POST /api/agents` | MCP·Skill·Agent 등록 |
 | `POST /api/catalog/{kind}/{id}/register` · `…/registry/refresh` · `…/registry/submit` · `…/registry/cancel` | Registry 등록·상태·승인 요청·취소 |
-| `GET/POST /api/registries` · `PUT /api/registries/selected` | Registry 목록·생성·선택 (생성·선택은 관리자) |
 | `GET/POST /api/sync` | 동기화 상태·수동 실행 |
 | `GET /api/gateway/models` · `POST /api/chat` | 프롬프트 테스트 (SSE) |
 | (공통) | MCP·Skill·Agent 테스트 요청은 선택 필드 `prompt_id`(harness system prompt)를 받음 |
@@ -185,7 +184,7 @@ python installer.py --skip-docker-build    # 이미지 재빌드 없이
 | `GET/POST/DELETE /api/admins` | 관리자(승인 가능한 사람) 조회·추가·제거 (관리자 전용) |
 | `GET /api/my/records?scope=mine\|all` | 내 레코드 (`all` 은 관리자만) |
 | `GET /api/admin/dashboard` | 접속 통계 · Registry type/상태별 현황 · 사용자별 등록 (관리자 전용) |
-| `GET /api/registries/defaults` · `POST /api/registries` | Registry 생성 기본값(IAM, auto-approval 꺼짐) · 생성(관리자) |
+| `GET /api/registry` | 연결된 Registry 정보(읽기 전용) |
 | `GET /api/admin/ping` | 관리자 전용 골격 |
 
 ## 알아둘 제약
