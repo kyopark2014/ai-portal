@@ -14,7 +14,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from . import auth, aws, db
+from . import admins, auth, aws, db
 
 log = logging.getLogger("catalog")
 router = APIRouter(prefix="/api")
@@ -39,6 +39,7 @@ def visible_item(item_id: int, user: auth.User, kind: str | None = None) -> dict
 
 
 DEFAULT_HARNESS_PROMPT = "harness_prompt"
+HARNESS_DESCRIPTIONS = {"ai_portal": "AI Portal 운영을 위한 Agent"}
 
 
 def harness_system_prompt(user: auth.User, prompt_id: int | None = None) -> list[dict] | None:
@@ -136,6 +137,23 @@ def _out(item: dict, user: auth.User) -> dict:
 
 
 # ── 공용 목록 ──
+@router.get("/my/records")
+def my_records(scope: Literal["mine", "all"] = "mine", user: auth.User = Depends(auth.current_user)):
+    """항목 목록과 상태별 개수. 기본은 내가 만든 것(승인 여부와 무관하게 거절·초안 포함).
+    관리자는 scope=all 로 모든 사용자의 항목을 볼 수 있다. 일반 사용자가 all 을 요청하면 거부한다."""
+    if scope == "all":
+        if user.role != "admin":
+            raise HTTPException(403, "관리자만 전체 레코드를 볼 수 있습니다")
+        items = [i for k in ("prompt", "mcp", "skill", "agent") for i in db.list_items(k)]
+        items.sort(key=lambda i: i["updated_at"], reverse=True)
+    else:
+        items = db.list_owned(user.email)
+    counts: dict[str, int] = {}
+    for i in items:
+        counts[i["registry_status"] or "NOT_REGISTERED"] = counts.get(i["registry_status"] or "NOT_REGISTERED", 0) + 1
+    return {"items": [_out(i, user) for i in items], "counts": counts, "total": len(items)}
+
+
 @router.get("/catalog/{kind}")
 def list_catalog(kind: Kind, q: str = "", user: auth.User = Depends(auth.current_user)):
     return {"items": [_out(i, user) for i in db.list_items(kind, q.strip(), (user.email, user.role == "admin"))]}
@@ -173,6 +191,7 @@ def delete_item(kind: Kind, item_id: int, user: auth.User = Depends(auth.current
             aws.registry_client().delete_registry_record(
                 registryId=it["registry_id"], recordId=it["registry_record_id"])
             done.append("registry_record")
+            _forget_assignment(it["registry_record_id"])
         except (ClientError, BotoCoreError) as e:
             if not _missing(e):
                 if isinstance(e, ClientError) and e.response["Error"]["Code"] == "ConflictException":
@@ -340,8 +359,9 @@ def sync_all() -> dict[str, int]:
                 full = aws.get_harness(h["harnessId"])
             except (ClientError, BotoCoreError):
                 full = h
-            desc = (full.get("systemPrompt") or "")
-            desc = desc if isinstance(desc, str) else ""
+            # harness 에는 description 필드가 없다(systemPrompt 는 list 라 설명으로 쓸 수 없다). 알려진 harness 는 정해 둔 설명을 쓰고,
+            # 그 외에는 비워 둔다(사용자가 화면에서 직접 쓴다). 사용자가 고친 설명은 upsert_synced 가 보존한다.
+            desc = HARNESS_DESCRIPTIONS.get(h.get("harnessName", ""), "")
             data = {"agent_type": "harness", "arn": h.get("arn", ""), "status": h.get("status", ""),
                     "model": str(full.get("model", ""))[:300]}
             if db.upsert_synced("agent", hid, h.get("harnessName", h["harnessId"]), desc[:300], data):
@@ -550,10 +570,18 @@ def sync_now(user: auth.User = Depends(auth.current_user)):
 
 
 # ── Registry (CreateRegistryRecord 로 등록정보 관리) ──
+# 새 Registry 의 기본값. 인증은 IAM, auto-approval 은 꺼짐(수동 승인).
+REGISTRY_DEFAULTS = {"authorizer": "AWS_IAM", "auto_approval": False}
+
+
 class RegistryIn(BaseModel):
     name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z][A-Za-z0-9_]*$")
-    description: str = ""
-    auto_approval: bool = False
+    description: str = Field("", max_length=1000)
+    authorizer: Literal["AWS_IAM", "CUSTOM_JWT"] = REGISTRY_DEFAULTS["authorizer"]
+    jwt_discovery_url: str = Field("", max_length=2000)        # CUSTOM_JWT 일 때 필수 (OIDC discovery URL)
+    jwt_allowed_audience: list[str] = Field(default_factory=list, max_length=20)
+    jwt_allowed_clients: list[str] = Field(default_factory=list, max_length=20)
+    auto_approval: bool = REGISTRY_DEFAULTS["auto_approval"]
 
 
 def selected_registry() -> str:
@@ -582,17 +610,30 @@ def list_registries(user: auth.User = Depends(auth.current_user)):
             "selected": selected_registry()}
 
 
+@router.get("/registries/defaults")
+def registry_defaults(user: auth.User = Depends(auth.current_user)):
+    return REGISTRY_DEFAULTS
+
+
 @router.post("/registries")
 def create_registry(body: RegistryIn, user: auth.User = Depends(auth.current_user)):
     if user.role != "admin":
         raise HTTPException(403, "admin only")
+    kw: dict[str, Any] = {"name": body.name, "description": body.description or body.name,
+                          "authorizerType": body.authorizer, "approvalConfiguration": {"autoApproval": body.auto_approval}}
+    if body.authorizer == "CUSTOM_JWT":
+        _check_url(body.jwt_discovery_url, "jwt_discovery_url")           # discoveryUrl 은 필수이며 http(s) URL 이어야 한다
+        jwt: dict[str, Any] = {"discoveryUrl": body.jwt_discovery_url}
+        if body.jwt_allowed_audience:
+            jwt["allowedAudience"] = body.jwt_allowed_audience
+        if body.jwt_allowed_clients:
+            jwt["allowedClients"] = body.jwt_allowed_clients
+        kw["authorizerConfiguration"] = {"customJWTAuthorizer": jwt}
     try:
-        r = aws.registry_client().create_registry(
-            name=body.name, description=body.description or body.name, authorizerType="AWS_IAM",
-            approvalConfiguration={"autoApproval": body.auto_approval})
+        r = aws.registry_client().create_registry(**kw)
     except (ClientError, BotoCoreError) as e:
         raise aws_err(e)
-    return {"registryArn": r["registryArn"]}
+    return {"registryArn": r["registryArn"], "authorizer": body.authorizer, "auto_approval": body.auto_approval}
 
 
 class SelectIn(BaseModel):
@@ -660,18 +701,44 @@ def refresh_registry(kind: Kind, item_id: int, user: auth.User = Depends(auth.cu
     return {**_out(db.get_item(item_id), user), "registry_reason": r.get("statusReason", "")}
 
 
+def _forget_assignment(record_id: str) -> None:
+    """record 가 사라지면 그 record 의 지정 승인자도 지운다(best effort — 남아도 해가 없지만 목록이 쌓이지 않게)."""
+    try:
+        admins.clear_assignment(record_id)
+    except Exception:  # noqa: BLE001
+        log.warning("could not clear approver assignment for %s", record_id)
+
+
+class SubmitIn(BaseModel):
+    approver: str = ""            # 선택: 승인을 맡길 관리자 이메일. 비우면 모든 관리자가 처리할 수 있다
+
+
+@router.get("/approvers")
+def approvers(user: auth.User = Depends(auth.current_user)):
+    """승인 요청 때 고를 수 있는 사람(= 관리자) 목록."""
+    return {"approvers": [{"email": a["email"]} for a in admins.listing()]}
+
+
 @router.post("/catalog/{kind}/{item_id}/registry/submit")
-def submit_registry(kind: Kind, item_id: int, user: auth.User = Depends(auth.current_user)):
+def submit_registry(kind: Kind, item_id: int, body: SubmitIn | None = None, user: auth.User = Depends(auth.current_user)):
     it = _own(item_id, kind, user)
     if not it["registry_record_id"]:
         raise HTTPException(409, "먼저 Registry 에 등록하세요")
+    approver = (body.approver if body else "").strip().lower()
+    if approver and approver not in admins.all_admins():
+        raise HTTPException(422, "선택한 사람은 승인 가능한 관리자가 아닙니다")
     try:
         r = aws.registry_client().submit_registry_record_for_approval(
             registryId=it["registry_id"], recordId=it["registry_record_id"])
     except (ClientError, BotoCoreError) as e:
         raise aws_err(e)
+    if approver:
+        try:
+            admins.assign(it["registry_record_id"], approver)
+        except Exception as e:  # noqa: BLE001 — 지정 저장이 실패해도 승인 요청 자체는 이미 접수됐다
+            log.warning("approver assignment not saved: %s", type(e).__name__)
     db.update_item(item_id, registry_status=r.get("status", "PENDING_APPROVAL"))
-    return _out(db.get_item(item_id), user)
+    return {**_out(db.get_item(item_id), user), "approver": approver or None}
 
 
 @router.post("/catalog/{kind}/{item_id}/registry/cancel")
@@ -704,5 +771,6 @@ def cancel_approval(kind: Kind, item_id: int, user: auth.User = Depends(auth.cur
         except (ClientError, BotoCoreError) as e:
             if not _missing(e):
                 raise aws_err(e)
+    _forget_assignment(it["registry_record_id"])
     db.update_item(item_id, registry_id=None, registry_record_id=None, registry_status=None)
     return _out(db.get_item(item_id), user)

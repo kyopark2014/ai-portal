@@ -44,7 +44,6 @@ region = "us-west-2"
 VPC_CIDR = "10.23.0.0/16"
 CONTAINER_PORT = 8501
 ADMIN_EMAILS = "e2npark@gmail.com"
-NOTIFY_EMAILS = [e.strip() for e in ADMIN_EMAILS.split(",") if e.strip()]  # 승인 요청 알림 수신자
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "application" / "config.json"
@@ -63,7 +62,6 @@ elbv2 = session.client("elbv2")
 logs = session.client("logs")
 secretsmanager = session.client("secretsmanager")
 cloudfront = session.client("cloudfront")
-sns = session.client("sns")
 events = session.client("events")
 agentcore = session.client("bedrock-agentcore-control")
 
@@ -157,44 +155,100 @@ def portal_origin() -> str:
     return (read_env_file("PORTAL_ORIGIN") or load_config().get("sharing_url") or "http://localhost:8501").rstrip("/")
 
 
-def ensure_approval_notifications(registry_id: str, origin: Optional[str] = None) -> Dict[str, str]:
-    """Registry 레코드가 PENDING_APPROVAL 이 되면 NOTIFY_EMAILS 로 승인 링크가 담긴 메일을 보낸다.
+NOTIFY_SENDER_LOCAL = "ai-portal"                       # 발신 주소: ai-portal@<도메인>
+NOTIFY_FUNCTION = f"{project_name}-approval-notify"
+NOTIFY_ROLE = f"role-lambda-notify-for-{project_name}-{region}"
 
-    메일의 링크 → 포털 로그인(Google) → 관리자면 해당 record 검토 화면. 승인·거절은 포털에서 한다.
+
+def _notify_sender() -> str:
+    return f"AI Portal <{NOTIFY_SENDER_LOCAL}@{DOMAIN.split('.', 1)[1]}>"      # portal.my-agentic-ai.click → my-agentic-ai.click
+
+
+def _package_notify_zip() -> bytes:
+    import io
+    import zipfile
+    src = ROOT / "lambda-notify" / "lambda_function.py"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(src, arcname="lambda_function.py")
+    return buf.getvalue()
+
+
+def _ensure_notify_role() -> str:
+    trust = {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Principal": {"Service": "lambda.amazonaws.com"},
+             "Action": "sts:AssumeRole"}]}
+    try:
+        arn = iam.get_role(RoleName=NOTIFY_ROLE)["Role"]["Arn"]
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "NoSuchEntity":
+            raise
+        arn = iam.create_role(RoleName=NOTIFY_ROLE, AssumeRolePolicyDocument=json.dumps(trust), Tags=TAGS)["Role"]["Arn"]
+        time.sleep(10)
+    iam.attach_role_policy(RoleName=NOTIFY_ROLE, PolicyArn="arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole")
+    iam.put_role_policy(RoleName=NOTIFY_ROLE, PolicyName="notify-permissions", PolicyDocument=json.dumps({
+        "Version": "2012-10-17", "Statement": [
+            {"Sid": "ReadApprovers", "Effect": "Allow", "Action": "ssm:GetParameter",
+             "Resource": [f"arn:aws:ssm:{region}:{account_id}:parameter/{project_name}/admins",
+                          f"arn:aws:ssm:{region}:{account_id}:parameter/{project_name}/approvers"]},
+            # SES 는 발신 ID 뿐 아니라 수신 주소(identity/<주소>)도 리소스로 검사한다. 수신자는 관리자 목록에서 동적으로
+            # 정해지므로 리소스는 이 계정의 SES ID 전체로 열고, 대신 "보낸 사람" 을 조건으로 우리 주소 하나에 고정한다.
+            {"Sid": "SendMail", "Effect": "Allow", "Action": "ses:SendEmail",
+             "Resource": [f"arn:aws:ses:{region}:{account_id}:identity/*"],
+             "Condition": {"StringEquals": {"ses:FromAddress": f"{NOTIFY_SENDER_LOCAL}@{DOMAIN.split('.', 1)[1]}"}}}]}))
+    return arn
+
+
+def ensure_approval_notifications(registry_id: str, origin: Optional[str] = None) -> Dict[str, str]:
+    """Registry 레코드가 PENDING_APPROVAL 이 되면 **지정된 승인자 한 명에게만**(지정이 없으면 모든 관리자에게) 메일을 보낸다.
+
+    EventBridge → Lambda(lambda-notify) → SES. SNS 토픽은 구독자 전원에게 가므로 쓰지 않는다.
+    메일의 링크 → 포털 로그인(Google) → 해당 record 검토 화면.
     """
     origin = (origin or portal_origin()).rstrip("/")
-    logger.info("[1b] Approval notifications → %s (link base %s)", ", ".join(NOTIFY_EMAILS), origin)
-    topic = sns.create_topic(Name=f"{project_name}-approval-requests", Tags=TAGS)["TopicArn"]  # idempotent
+    lam = session.client("lambda")
+    logger.info("[1b] Approval notifications → Lambda %s (SES sender %s, link base %s)", NOTIFY_FUNCTION, _notify_sender(), origin)
+    role = _ensure_notify_role()
+    cfg = {"Environment": {"Variables": {
+        "SENDER": _notify_sender(), "PORTAL_ORIGIN": origin, "ADMIN_EMAILS": ADMIN_EMAILS,
+        "ADMINS_PARAM": f"/{project_name}/admins", "APPROVERS_PARAM": f"/{project_name}/approvers"}},
+        "Timeout": 30, "MemorySize": 128}
+    zipped = _package_notify_zip()
+    try:
+        lam.get_function(FunctionName=NOTIFY_FUNCTION)
+        lam.update_function_code(FunctionName=NOTIFY_FUNCTION, ZipFile=zipped)
+        lam.get_waiter("function_updated").wait(FunctionName=NOTIFY_FUNCTION)
+        lam.update_function_configuration(FunctionName=NOTIFY_FUNCTION, Role=role, **cfg)
+    except lam.exceptions.ResourceNotFoundException:
+        for attempt in range(6):                 # 새 역할 전파 대기
+            try:
+                lam.create_function(FunctionName=NOTIFY_FUNCTION, Runtime="python3.12", Role=role, Handler="lambda_function.handler",
+                                    Code={"ZipFile": zipped}, Tags={"Project": project_name}, **cfg)
+                break
+            except ClientError as e:
+                if e.response["Error"]["Code"] == "InvalidParameterValueException" and attempt < 5:
+                    time.sleep(8)
+                    continue
+                raise
+    lam.get_waiter("function_active_v2").wait(FunctionName=NOTIFY_FUNCTION)
+    fn_arn = lam.get_function(FunctionName=NOTIFY_FUNCTION)["Configuration"]["FunctionArn"]
+
     rule_name = f"{project_name}-approval-requested"
     rule_arn = f"arn:aws:events:{region}:{account_id}:rule/{rule_name}"
-    sns.set_topic_attributes(TopicArn=topic, AttributeName="Policy", AttributeValue=json.dumps({
-        "Version": "2012-10-17", "Statement": [{
-            "Sid": "AllowEventBridgePublish", "Effect": "Allow", "Principal": {"Service": "events.amazonaws.com"},
-            "Action": "sns:Publish", "Resource": topic,
-            "Condition": {"ArnEquals": {"aws:SourceArn": rule_arn}, "StringEquals": {"aws:SourceAccount": account_id}}}]}))
-
-    subscribed = {x["Endpoint"].lower(): x["SubscriptionArn"] for x in
-                  sns.list_subscriptions_by_topic(TopicArn=topic).get("Subscriptions", [])}
-    for email in NOTIFY_EMAILS:
-        if email.lower() not in subscribed:
-            sns.subscribe(TopicArn=topic, Protocol="email", Endpoint=email)
-            logger.info("확인 메일을 보냈습니다: %s — 메일의 'Confirm subscription' 링크를 눌러야 알림이 옵니다", email)
-        elif subscribed[email.lower()] == "PendingConfirmation":
-            logger.warning("%s: 구독 확인 대기 중입니다 (메일의 Confirm subscription 링크 필요)", email)
-
     pattern = {**APPROVAL_PATTERN, "detail": {"registryId": [registry_id]}}
     events.put_rule(Name=rule_name, EventPattern=json.dumps(pattern), State="ENABLED", Tags=TAGS,
-                    Description=f"{project_name}: record submitted for approval → email")
-    # EventBridge InputTemplate 은 줄바꿈이 든 문자열을 거부한다(ValidationException). 그래서 한 줄로 만든다.
-    # SNS 이메일은 본문 그대로 보내므로 URL 이 줄 끝에 오게 해서 메일 클라이언트가 링크로 인식하게 한다.
-    template = json.dumps(
-        f"[AI Portal] 승인 요청 - Record <rec> - 아래 링크에서 로그인 후 검토/승인하세요: {origin}/approvals/<rec>",
-        ensure_ascii=False)
-    events.put_targets(Rule=rule_name, Targets=[{
-        "Id": "email", "Arn": topic,
-        "InputTransformer": {"InputPathsMap": {"rec": "$.detail.registryRecordId"}, "InputTemplate": template}}])
-    save_config(approval_topic_arn=topic, approval_rule=rule_name, approval_link_base=origin)
-    return {"topic_arn": topic, "rule": rule_name, "link_base": origin}
+                    Description=f"{project_name}: record submitted for approval → mail to the assigned approver")
+    try:                                          # 이 규칙만 Lambda 를 호출할 수 있게 한다
+        lam.add_permission(FunctionName=NOTIFY_FUNCTION, StatementId="events-invoke", Action="lambda:InvokeFunction",
+                           Principal="events.amazonaws.com", SourceArn=rule_arn)
+    except lam.exceptions.ResourceConflictException:
+        pass
+    events.put_targets(Rule=rule_name, Targets=[{"Id": "notify", "Arn": fn_arn}])
+    try:                                          # 예전 SNS 대상은 제거(이중 발송 방지)
+        events.remove_targets(Rule=rule_name, Ids=["email"])
+    except ClientError:
+        pass
+    save_config(approval_lambda=NOTIFY_FUNCTION, approval_rule=rule_name, approval_link_base=origin, approval_sender=_notify_sender())
+    return {"lambda": NOTIFY_FUNCTION, "rule": rule_name, "link_base": origin}
 
 
 # ── 1c. Harness agent (MCP 테스트용) ─────────────────────────────────
@@ -361,6 +415,10 @@ def create_ecs_roles(secret_arns: List[str]) -> Dict[str, str]:
                 "bedrock-agentcore:InvokeAgentRuntimeForUser",
                 # Skill 테스트: harness 세션에 Node.js 설치
                 "bedrock-agentcore:InvokeAgentRuntimeCommand"]},
+            # 화면에서 추가한 승인자 목록과 record 별 지정 승인자는 재배포로 사라지지 않도록 SSM Parameter Store 에 둔다
+            {"Sid": "ApproverStore", "Effect": "Allow", "Action": ["ssm:GetParameter", "ssm:PutParameter"],
+             "Resource": [f"arn:aws:ssm:{region}:{account_id}:parameter/{project_name}/admins",
+                          f"arn:aws:ssm:{region}:{account_id}:parameter/{project_name}/approvers"]},
             {"Sid": "RegistryRecords", "Effect": "Allow", "Resource": "*", "Action": [
                 "bedrock-agentcore:CreateRegistry", "bedrock-agentcore:CreateRegistryRecord",
                 "bedrock-agentcore:GetRegistryRecord", "bedrock-agentcore:ListRegistryRecords",

@@ -33,6 +33,14 @@ CREATE TABLE IF NOT EXISTS items (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_items_ext ON items(kind, ext_id) WHERE ext_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_items_kind ON items(kind, updated_at DESC);
+CREATE TABLE IF NOT EXISTS login_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  logged_at REAL NOT NULL            -- 프로필 사진 URL 은 저장하지 않는다(최소 수집)
+);
+CREATE INDEX IF NOT EXISTS ix_login_email ON login_events(email, logged_at DESC);
+CREATE INDEX IF NOT EXISTS ix_login_at ON login_events(logged_at DESC);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
@@ -81,6 +89,13 @@ def list_items(kind: str, q: str = "", viewer: tuple[str, bool] | None = None) -
         args.append(viewer[0])
     with conn() as c:
         rows = c.execute(sql + " ORDER BY updated_at DESC", args).fetchall()
+    return [_row(r) for r in rows]
+
+
+def list_owned(email: str) -> list[dict]:
+    """한 사용자가 소유한 모든 종류의 항목(최근 변경순)."""
+    with conn() as c:
+        rows = c.execute("SELECT * FROM items WHERE owner=? ORDER BY updated_at DESC", (email,)).fetchall()
     return [_row(r) for r in rows]
 
 
@@ -162,3 +177,43 @@ def set_setting(key: str, value: str) -> None:
     with conn() as c:
         c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                   (key, value))
+
+
+def record_login(email: str, name: str) -> bool:
+    """로그인 한 번을 기록한다. 이 사용자의 첫 로그인이면 True."""
+    with conn() as c:
+        first = c.execute("SELECT 1 FROM login_events WHERE email=? LIMIT 1", (email.lower(),)).fetchone() is None
+        c.execute("INSERT INTO login_events(email,name,logged_at) VALUES(?,?,?)", (email.lower(), name[:200], time.time()))
+    return first
+
+
+def user_stats() -> list[dict]:
+    """사용자별 로그인 요약 + 그 사용자가 만든 항목의 종류별·상태별 개수. 로그인한 적 없는 소유자(registry/aws)도 포함한다."""
+    with conn() as c:
+        logins = {r["email"]: dict(r) for r in c.execute(
+            "SELECT email, COUNT(*) AS login_count, MIN(logged_at) AS first_login, MAX(logged_at) AS last_login, "
+            "(SELECT name FROM login_events l2 WHERE l2.email=l.email ORDER BY logged_at DESC LIMIT 1) AS name "
+            "FROM login_events l GROUP BY email")}
+        items = c.execute("SELECT owner, kind, registry_status AS st, COUNT(*) AS n FROM items GROUP BY owner, kind, registry_status").fetchall()
+    users: dict[str, dict] = {e: {**v, "kinds": {}, "statuses": {}, "total": 0} for e, v in logins.items()}
+    for r in items:
+        u = users.setdefault(r["owner"].lower(), {"email": r["owner"].lower(), "login_count": 0, "first_login": None,
+                                                  "last_login": None, "name": "", "kinds": {}, "statuses": {}, "total": 0})
+        u["kinds"].setdefault(r["kind"], {})[r["st"] or "NOT_REGISTERED"] = u["kinds"].get(r["kind"], {}).get(r["st"] or "NOT_REGISTERED", 0) + r["n"]
+        u["statuses"][r["st"] or "NOT_REGISTERED"] = u["statuses"].get(r["st"] or "NOT_REGISTERED", 0) + r["n"]
+        u["total"] += r["n"]
+    return sorted(users.values(), key=lambda u: (u["last_login"] or 0, u["total"]), reverse=True)
+
+
+def login_totals() -> dict:
+    with conn() as c:
+        return dict(c.execute(
+            "SELECT COUNT(*) AS total_logins, COUNT(DISTINCT email) AS unique_users, "
+            "COUNT(DISTINCT CASE WHEN logged_at >= ? THEN email END) AS active_7d FROM login_events",
+            (time.time() - 7 * 86400,)).fetchone())
+
+
+def recent_logins(limit: int = 30) -> list[dict]:
+    with conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT email, name, logged_at FROM login_events ORDER BY logged_at DESC LIMIT ?", (min(max(limit, 1), 200),))]

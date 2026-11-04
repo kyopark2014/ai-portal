@@ -132,8 +132,11 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
   const [out, setOut] = useState("");
   const [regs, setRegs] = useState<{ list: Registry[]; selected: string } | null>(null);
   const [ask, setAsk] = useState<ConfirmSpec | null>(null);
+  const [approvers, setApprovers] = useState<string[]>([]);
+  const [approver, setApprover] = useState("");
   const d = item.data;
 
+  useEffect(() => { if (item.registry_status === "DRAFT" && item.can_edit) api.listApprovers().then((r) => setApprovers(r.approvers.map((a) => a.email))).catch(() => {}); }, [item.registry_status, item.can_edit]);
   useEffect(() => { api.listRegistries().then((r) => setRegs({ list: r.registries, selected: r.selected })).catch(() => setRegs({ list: [], selected: "" })); }, []);
 
   async function run<T>(fn: () => Promise<T>, ok?: (r: T) => void) {
@@ -231,7 +234,14 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
                 confirmLabel: "승인 요청 취소", cancelLabel: "닫기", danger: true,
                 onConfirm: () => run(() => api.cancelApproval(item.kind, item.id), (i) => { upd(i); setMsg("승인 요청을 취소했습니다. 필요하면 다시 등록하세요."); }),
               })}>승인 요청 취소</button>}
-            {item.can_edit && item.registry_status === "DRAFT" && <button className="btn" disabled={busy} onClick={() => run(() => api.submitRegistry(item.kind, item.id), (i) => { upd(i); setMsg("승인 요청을 보냈습니다."); })}>승인 요청</button>}
+            {item.can_edit && item.registry_status === "DRAFT" && (<>
+              {approvers.length > 0 && (
+                <label className="field inline"><span className="lbl">승인자</span>
+                  <select value={approver} onChange={(e) => setApprover(e.target.value)} disabled={busy} aria-label="승인자 선택">
+                    <option value="">누구나 (모든 관리자)</option>
+                    {approvers.map((a) => <option key={a} value={a}>{a}</option>)}
+                  </select></label>)}
+              <button className="btn" disabled={busy} onClick={() => run(() => api.submitRegistry(item.kind, item.id, approver), (i) => { upd(i); setMsg(approver ? `${approver} 님에게 승인 요청을 보냈습니다.` : "승인 요청을 보냈습니다."); })}>승인 요청</button></>)}
           </div></div>
         ) : regs && !regs.selected ? (
           <p className="hint">사용할 Registry가 선택되지 않았습니다. {user.role === "admin" ? "아래에서 선택하세요." : "관리자가 선택해야 등록할 수 있습니다."}</p>

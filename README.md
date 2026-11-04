@@ -68,8 +68,8 @@ Publisher 에게 `UpdateRegistryRecordStatus` 를 주지 않으면 **자기 승�
 
 | 단계 | 구성 | 이 포털 |
 |---|---|---|
-| 기본 | EventBridge → SNS 이메일 | **사용 중** (아래 [AWS 리소스](#aws-리소스-installerpy)) |
-| 중간 | EventBridge → Lambda → Slack/Teams | — |
+| 기본 | EventBridge → SNS 이메일 | 사용하지 않음 (구독자 전원에게 가서 승인자별로 나눌 수 없음) |
+| 중간 | EventBridge → Lambda → (Slack/Teams 대신) **SES 이메일** | **사용 중** — 지정된 승인자 한 명에게만 (아래 [AWS 리소스](#aws-리소스-installerpy)) |
 | 고급 | Step Functions `waitForTaskToken` — 자동 사전 검사, 승인 버튼, 결과 반영(Inspector·GuardDuty 검사 연동 가능) | — |
 
 ### 알아둘 점
@@ -105,7 +105,7 @@ cp .env.example .env     # GOOGLE_CLIENT_ID, LLM_GATEWAY_KEY 등 입력
 | 변수 | 설명 |
 |---|---|
 | `GOOGLE_CLIENT_ID` | Google OAuth Web client ID (공개 값) |
-| `ADMIN_EMAILS` | 쉼표 구분 관리자 이메일 (승인 알림 수신자도 이 값) |
+| `ADMIN_EMAILS` | 쉼표 구분 **최초 관리자** 이메일. 화면에서 지울 수 없습니다. 추가 관리자는 화면에서 관리하며 SSM `/ai-portal/admins` 에 저장됩니다 |
 | `SESSION_SIGNING_KEY` | 세션 쿠키 서명 키. 비우면 로컬에 자동 생성. ECS 는 Secrets Manager 로 주입 |
 | `COOKIE_SECURE` | https 뒤에서는 `1` |
 | `LLM_GATEWAY_URL` / `LLM_GATEWAY_KEY` | 프롬프트 테스트용 AWSome AI Gateway. 키는 서버에만 있고 브라우저로 나가지 않음 |
@@ -134,6 +134,11 @@ cp .env.example .env     # GOOGLE_CLIENT_ID, LLM_GATEWAY_KEY 등 입력
 - **harness system prompt**: harness `ai_portal` 을 실행하는 모든 테스트(MCP·Skill·harness 종류 Agent)는 prompt 를 따로 지정하지 않으면 **`harness_prompt`**(Prompt Management 에 등록한 prompt)를 `systemPrompt` 로 씁니다. 테스트 화면의 "System prompt" 에서 다른 prompt 를 고르면 그것이 우선합니다(요청의 `prompt_id`). 기본 prompt 는 **승인(APPROVED)된 경우에만** 적용하고(미승인 내용이 모두에게 퍼지지 않게), 없거나 승인되지 않았으면 harness 자체 기본값을 씁니다. 본문은 포털 DB 사본이 아니라 Prompt Management 에서 읽어 수정이 바로 반영됩니다(현재 `DRAFT` 버전). 기본 prompt 를 읽지 못하면 조용히 harness 기본값으로, 사용자가 직접 고른 prompt 를 읽지 못하면 오류로 응답합니다. runtime 종류 Agent(`agentic_work` 등)에는 적용하지 않습니다. `{{변수}}` 가 있는 prompt 를 고르면 값이 채워지지 않은 채 전달됩니다.
 - **Agent 테스트**: Agent 를 Open → 상세 화면의 "테스트"에서 프롬프트를 보내면 해당 agent 를 호출하고 응답과 도구 호출/결과를 보여줍니다. harness → `InvokeHarness`, runtime(HTTP) → `InvokeAgentRuntime`(agentic-work 와 같은 `prompt` payload, `model_name` 은 보내지 않아 agent 기본 모델 사용, 이전 대화는 프롬프트에 이어 붙임). MCP 프로토콜 runtime 은 MCP 서버라 MCP 탭에서 테스트. harness 가 만든 내부 runtime(`harness_*`)은 직접 호출 불가라 동기화에서 제외.
 - **Registry 상태**: 상세 화면에서 상태 확인 / 승인 요청 / **승인 요청 취소**.
+- **승인자 지정**: 승인 요청 때 승인 가능한 사람(관리자) 목록에서 **승인자를 고를 수 있습니다**(기본은 "누구나 — 모든 관리자"). 지정하면 **그 사람만** 승인·거절할 수 있고(다른 관리자는 403, 승인 화면에서도 버튼 비활성), 메일도 그 사람에게만 갑니다. 지정은 처리·취소·삭제 시 해제됩니다. 지정된 사람이 관리자에서 빠지면 다른 관리자가 처리할 수 있게 풀립니다.
+- **승인자(관리자) 관리**: 승인 메뉴의 "승인자 관리" 탭에서 관리자를 **추가·제거**합니다(바로 반영, 재배포 불필요). 최초 관리자(`ADMIN_EMAILS`)와 자기 자신은 지울 수 없습니다. 목록은 컨테이너 DB 가 아니라 **SSM Parameter Store** 에 저장해 재배포 후에도 유지되며, SSM 을 읽지 못하면 최초 관리자만 관리자로 인정합니다(fail closed).
+- **내 레코드**: "내 정보"에서 내가 만든 항목을 종류·Registry 상태별로 봅니다(승인 대기·거절·초안 포함, 상태 필터, Open 으로 상세). 관리자는 "내 것 / 전체" 를 전환해 모든 사용자의 항목(소유자 포함)을 볼 수 있고, 일반 사용자의 `scope=all` 요청은 403 입니다.
+- **관리 대시보드(관리자)**: "관리" 메뉴. ① 접속 통계(접속한 사용자·최근 7일 활성·총 로그인) ② **Registry 등록 현황** — type(Prompt/MCP/Skill/Agent)별 승인·진행 상태 개수(AWS Registry 를 직접 조회) ③ **사용자 표** — 로그인 횟수·마지막 접속·소유한 항목을 type 별·상태별로 ④ 최근 접속 ⑤ 레지스트리 관리(Registry 선택, 새 Registry 생성). 접속 기록은 **이메일·이름·시각만** 저장하고(프로필 사진 URL 은 저장 안 함) 컨테이너 SQLite 라 재배포하면 초기화됩니다.
+- **Registry 생성 기본값**: 인증 **IAM**, auto-approval **꺼짐**(수동 승인). 화면에서 JWT(OIDC discovery URL 필수) 나 auto-approval 켜기도 고를 수 있고, 켜면 경고가 나옵니다.
 - **승인(관리자)**: 상단 "승인" 메뉴 또는 메일 링크(`/approvals/<recordId>`). Registry 를 직접 조회해 대기·승인됨·거절됨·Deprecated 탭으로 보고, record 내용을 검토한 뒤 승인/거절(사유 필수)/Deprecate 합니다. AWS 의 현재 상태를 확인하고 처리해 이중 처리를 막으며(409), 사유에 처리자 이메일(`[by …]`)을 남깁니다. 일반 사용자는 403.
 - **삭제**: Registry record → Prompt Management → 포털 DB 순. record 가 `CREATING` 이면 409(등록 직후 몇 초간 삭제 불가). AWS 동기화 항목은 포털 목록에서만 지워짐.
 - **Registry 기반 복원**: 동기화 마지막 단계(`sync_registry`)가 Registry 의 record 를 읽어 포털 항목과 연결합니다. DB 가 비어 있어도(재배포·신규 서버) 복구되며, 승인 상태도 Registry 에서 가져옵니다. prompt(Prompt Management 포인터)·skill(Git/S3 출처)·agent(ARN)·MCP(URL)를 record 내용에서 복원합니다. 같은 대상의 동기화 항목(prompt·agent·Gateway)이 있으면 그 항목에 연결하고(중복 생성 안 함), 없으면 새로 만듭니다. 이미 연결된 항목은 상태만 갱신하며 사용자가 고친 설명은 덮어쓰지 않습니다. `CREATING`/`UPDATING` 중인 record 와 포털이 만들지 않은 형식의 record 는 건너뜁니다. **복원되지 않는 것**: MCP 의 HTTP 헤더(Registry 에 저장하지 않음), 원래 소유자(→ 소유자 `registry`, 관리자만 수정·삭제).
@@ -151,7 +156,7 @@ python installer.py --skip-docker-build    # 이미지 재빌드 없이
 ```
 - **Harness agent `ai_portal`**: MCP 테스트용(`harness-work` 방식). `harnessName` 은 하이픈 불가라 `ai_portal`. 모델 `us.anthropic.claude-sonnet-5-5`, 전용 역할 `role-harness-for-ai-portal-us-west-2`(Bedrock 모델 호출 + `InvokeGateway` + harness 메모리). ID/ARN 은 `application/config.json`(`harness_id`, `harness_arn`) (값은 `config.json` 의 `harness_id` 참조). 도구는 호출마다 지정하므로 harness 자체는 MCP 와 무관합니다.
 - **Registry `ai-portal`**: IAM 인증, auto-approval 꺼짐. ID 는 `application/config.json`(`registry_id`)에 기록 (us-west-2, 값은 `config.json` 의 `registry_id` 참조).
-- **승인 요청 메일(Basic)**: EventBridge 규칙 `ai-portal-approval-requested`(`Registry Record State changed to Pending Approval`, 이 Registry 만) → SNS `ai-portal-approval-requests` → `ADMIN_EMAILS`. **수신자가 SNS 확인 메일의 "Confirm subscription" 을 눌러야** 메일이 옵니다. 메일 본문에 승인 링크(`{PORTAL_ORIGIN}/approvals/<recordId>`)가 들어가며, 링크 주소를 바꾸려면 `PORTAL_ORIGIN` 설정 후 `--notifications-only` 를 다시 실행합니다(전체 설치 시에는 CloudFront 주소로 자동 설정). EventBridge 는 줄바꿈이 든 InputTemplate 을 거부하므로 메일 본문은 한 줄입니다.
+- **승인 요청 메일**: EventBridge 규칙 `ai-portal-approval-requested`(`Registry Record State changed to Pending Approval`, 이 Registry 만) → Lambda `ai-portal-approval-notify`(`lambda-notify/`) → **SES**. 수신자는 요청 때 **지정한 승인자 한 명**이고, 지정이 없으면(또는 지정된 사람이 더 이상 관리자가 아니면) 모든 관리자에게 갑니다. 메일에 승인 링크(`{PORTAL_ORIGIN}/approvals/<recordId>`)가 들어갑니다. 발신 주소는 `ai-portal@my-agentic-ai.click` 하나로 IAM 조건 키로 고정되고, 도메인은 DKIM 인증을 마쳤습니다. **SES 샌드박스 제약**: 이 계정의 SES 는 프로덕션 액세스가 꺼져 있어, *인증된 수신 주소로만* 발송됩니다(하루 200통). 승인자를 추가할 때마다 그 주소를 SES 에 등록·인증하거나 SES 프로덕션 액세스를 신청해야 합니다. 링크 주소를 바꾸려면 `PORTAL_ORIGIN` 설정 후 `--notifications-only` 를 다시 실행합니다.
 - **전체 설치(실행됨, 2026-11-04)**: 새 VPC `10.23.0.0/16`, ALB(보안 그룹이 CloudFront origin-facing prefix list 의 80 만 허용 → 인터넷에서 ALB 직접 접속 불가, 안쪽은 `X-Origin-Verify` 비밀 헤더), ECR(arm64), ECS Fargate desired=1, CloudFront(HTTPS 강제·보안 헤더), Secrets Manager(`ai-portal/session-signing-key`, `llm-gateway-key`). **배포 URL: https://portal.my-agentic-ai.click** (`config.json` 의 `sharing_url`; CloudFront 기본 주소(`config.json` 의 `cloudfront_domain`)도 계속 동작). 사용하는 주소를 Google OAuth client 의 **Authorized JavaScript origins** 에 추가해야 로그인됩니다. 이미지에는 `config.json` 이 들어가지 않으므로 Registry ID·harness ARN 은 ECS 환경 변수(`REGISTRY_ID`, `HARNESS_ARN`)로 전달합니다. 보안 그룹 이름은 `sg-` 로 시작할 수 없습니다(AWS 제약). 재배포: 코드 변경 후 `python installer.py`(이미지를 다시 빌드·푸시하고 ECS 를 강제 재배포), 이미지 재빌드 없이 인프라만은 `--skip-docker-build`.
 - ECS task role: Prompt Management, AgentCore 조회·Registry record 권한 (Bedrock 모델 직접 호출 권한은 없음 — 테스트는 Gateway 경유).
 
@@ -171,9 +176,16 @@ python installer.py --skip-docker-build    # 이미지 재빌드 없이
 | `POST /api/agents/{id}/chat` | Agent 테스트 — harness/runtime 호출 (SSE) |
 | `GET /api/mcp/test-status` · `POST /api/mcp/{id}/chat` | MCP 테스트 — harness agent (SSE: 텍스트·도구 호출·도구 결과) |
 | `GET /api/approvals?status=` · `GET /api/approvals/{recordId}` · `POST /api/approvals/{recordId}/decision` | 승인 큐·검토·승인/거절/deprecate (관리자 전용) |
+| `GET /api/approvers` · `POST …/registry/submit {approver}` | 승인자 목록 · 승인 요청(승인자 지정) |
+| `GET/POST/DELETE /api/admins` | 관리자(승인 가능한 사람) 조회·추가·제거 (관리자 전용) |
+| `GET /api/my/records?scope=mine\|all` | 내 레코드 (`all` 은 관리자만) |
+| `GET /api/admin/dashboard` | 접속 통계 · Registry type/상태별 현황 · 사용자별 등록 (관리자 전용) |
+| `GET /api/registries/defaults` · `POST /api/registries` | Registry 생성 기본값(IAM, auto-approval 꺼짐) · 생성(관리자) |
 | `GET /api/admin/ping` | 관리자 전용 골격 |
 
 ## 알아둘 제약
+- **SES 샌드박스**: 승인 알림은 인증된 수신 주소로만 발송됩니다. 새 승인자를 추가하면 그 주소를 SES 에 등록·인증해야 메일을 받습니다(프로덕션 액세스를 신청하면 해소).
+- **harness 의 description**: harness 에는 설명 필드가 없어 동기화 시 알려진 harness 의 기본 설명을 씁니다(`ai_portal` → "AI Portal 운영을 위한 Agent"). 사용자가 고친 설명은 유지됩니다. 또 **승인된 Registry record 의 설명이나 내용을 수정하면 record 가 `DRAFT` 로 되돌아가 다시 승인을 받아야 합니다.**
 - **배포본과 로컬의 DB 는 별개**: Registry 에 record 가 있어도 포털 항목과의 연결은 각 서버의 SQLite 에 있습니다. 서버는 로그인 시 동기화(Registry 복원 포함)로 채워집니다. 복원된 항목의 소유자는 `registry` 입니다.
 - **배포 중 일시 중단**: 단일 태스크(desired=1, `minimumHealthyPercent=0`)라 재배포 동안(수 분) 503 이 됩니다. 무중단은 태스크 2개 이상 + 영구 저장소가 필요합니다.
 - **동기화 항목의 공개 범위**: AWS 에서 가져온 항목(harness·runtime·Gateway·AWS 의 prompt)은 Registry 에 등록·승인되기 전에는 승인 상태가 없어 일반 사용자에게 보이지 않습니다. 관리자가 Registry 에 등록해 승인해야 공개됩니다. 포털의 승인 상태는 "상태 확인"·승인 처리 때만 갱신되므로 AWS 콘솔에서 직접 처리하면 늦게 반영됩니다.

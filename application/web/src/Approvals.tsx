@@ -1,17 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import * as api from "./api";
 import type { RecStatus, RegDetail, RegRecord } from "./api";
+import AdminManager from "./AdminManager";
 
-const TABS: { s: RecStatus; label: string }[] = [
+const TABS: { s: RecStatus | "ADMINS"; label: string }[] = [
   { s: "PENDING_APPROVAL", label: "승인 대기" }, { s: "APPROVED", label: "승인됨" },
-  { s: "REJECTED", label: "거절됨" }, { s: "DEPRECATED", label: "Deprecated" },
+  { s: "REJECTED", label: "거절됨" }, { s: "DEPRECATED", label: "Deprecated" }, { s: "ADMINS", label: "승인자 관리" },
 ];
 const TYPE: Record<string, string> = { MCP: "MCP", A2A: "Agent", AGENT_SKILLS: "Skill", CUSTOM: "Prompt/Custom" };
 
 function when(iso: string | null) { return iso ? new Date(iso).toLocaleString("ko-KR", { hour12: false }) : "-"; }
 
 export default function Approvals({ openId, onOpened }: { openId: string | null; onOpened: () => void }) {
-  const [tab, setTab] = useState<RecStatus>("PENDING_APPROVAL");
+  const [tab, setTab] = useState<RecStatus | "ADMINS">("PENDING_APPROVAL");
   const [rows, setRows] = useState<RegRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -19,6 +20,7 @@ export default function Approvals({ openId, onOpened }: { openId: string | null;
 
   const load = useCallback(async () => {
     setLoading(true); setErr("");
+    if (tab === "ADMINS") { setLoading(false); return; }
     try { setRows((await api.listApprovals(tab)).records); } catch (e: any) { setErr(e.message); }
     setLoading(false);
   }, [tab]);
@@ -34,14 +36,15 @@ export default function Approvals({ openId, onOpened }: { openId: string | null;
         {TABS.map((t) => <button key={t.s} role="tab" aria-selected={tab === t.s} className={`tab ${tab === t.s ? "on" : ""}`} onClick={() => setTab(t.s)}>{t.label}</button>)}
       </div>
       {err && <p className="note error" role="alert">{err}</p>}
-      {loading ? <p className="sub">불러오는 중…</p> : rows.length === 0 ? (
+      {tab === "ADMINS" ? <AdminManager /> : loading ? <p className="sub">불러오는 중…</p> : rows.length === 0 ? (
         <div className="empty-box"><p>{tab === "PENDING_APPROVAL" ? "승인 대기 중인 요청이 없습니다." : "해당하는 record가 없습니다."}</p></div>
       ) : (
         <div className="rows">
           {rows.map((r) => (
             <article className="item" key={r.recordId}>
               <header><span className="avatar-l" aria-hidden>{r.name[0]?.toUpperCase()}</span><h3 title={r.name}>{r.name}</h3></header>
-              <p className="by">{TYPE[r.descriptorType] ?? r.descriptorType}{r.portal ? ` · ${r.portal.owner.split("@")[0]}` : " · 포털 외 등록"}</p>
+              <p className="by">{TYPE[r.descriptorType] ?? r.descriptorType}{r.portal ? ` · ${r.portal.owner.split("@")[0]}` : " · 포털 외 등록"}
+                {r.approver && <span className={`badge ${r.can_decide ? "user" : ""}`}>{r.can_decide ? "내게 지정됨" : `승인자 ${r.approver.split("@")[0]}`}</span>}</p>
               <div className="preview"><p className="desc">{r.description || <em>설명 없음</em>}</p></div>
               <footer><span>요청 {when(r.updatedAt)}</span>
                 <div className="acts"><button type="button" className="link" onClick={() => setSel(r.recordId)}>검토</button></div></footer>
@@ -72,6 +75,7 @@ function ReviewModal({ id, onClose, onDone }: { id: string; onClose: () => void;
     setBusy(false);
   }
   const pending = d?.status === "PENDING_APPROVAL";
+  const allowed = d?.can_decide !== false;               // 다른 관리자에게 지정된 요청이면 볼 수만 있고 처리는 못 한다
 
   return (
     <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
@@ -87,13 +91,15 @@ function ReviewModal({ id, onClose, onDone }: { id: string; onClose: () => void;
           <h3>Record 내용</h3>
           <pre className="code">{typeof d.content === "string" ? d.content : JSON.stringify(d.content, null, 2)}</pre>
           {d.statusReason && <p className="hint">처리 사유: {d.statusReason}</p>}
+          {pending && d.approver && <p className={allowed ? "hint" : "note error"} role="status">
+            {allowed ? `이 요청은 ${d.approver} 님에게 지정되었습니다.` : `이 요청은 ${d.approver} 님에게 지정되어 있어 처리할 수 없습니다.`}</p>}
           {pending ? (<>
             <label className="field"><span className="lbl">사유 <span className="hint">거절 시 필수 · {reason.length}/200</span></span>
               <textarea rows={2} maxLength={200} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="요청자에게 남길 메모" /></label>
             <div className="actions">
               <button className="btn ghost" onClick={onClose}>닫기</button>
-              <button className="btn danger" disabled={busy || !reason.trim()} title={reason.trim() ? "" : "거절 사유를 입력하세요"} onClick={() => go("REJECTED")}>거절</button>
-              <button className="btn" disabled={busy} onClick={() => go("APPROVED")}>승인</button>
+              <button className="btn danger" disabled={busy || !allowed || !reason.trim()} title={!allowed ? "지정된 승인자만 처리할 수 있습니다" : reason.trim() ? "" : "거절 사유를 입력하세요"} onClick={() => go("REJECTED")}>거절</button>
+              <button className="btn" disabled={busy || !allowed} title={allowed ? "" : "지정된 승인자만 처리할 수 있습니다"} onClick={() => go("APPROVED")}>승인</button>
             </div></>) : (
             <div className="actions"><button className="btn ghost" onClick={onClose}>닫기</button>
               {d.status === "APPROVED" && <button className="btn danger" disabled={busy} onClick={() => go("DEPRECATED")}>Deprecate</button>}

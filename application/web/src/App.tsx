@@ -2,22 +2,20 @@ import { useEffect, useState } from "react";
 import * as api from "./api";
 import Approvals from "./Approvals";
 import Explore from "./Explore";
+import AdminDashboard from "./AdminDashboard";
+import MyRecords from "./MyRecords";
+import { DetailModal } from "./Modals";
 import GoogleButton, { disableAutoSelect } from "./GoogleButton";
 
 const ROLE_LABEL: Record<api.Role, string> = { admin: "관리자", user: "일반 사용자" };
-
-// 이후 단계에서 채울 Agent Registry 화면. 역할별로 보이는 메뉴가 다르다.
-const SECTIONS: { title: string; desc: string; adminOnly?: boolean }[] = [
-  { title: "내 레코드", desc: "등록한 레코드의 상태(DRAFT → PENDING_APPROVAL → APPROVED)를 확인합니다." },
-  { title: "승인 큐", desc: "승인 대기 레코드를 검토하고 승인·거절·deprecate 합니다.", adminOnly: true },
-  { title: "레지스트리 관리", desc: "레지스트리 생성, 인증 방식, auto-approval 설정.", adminOnly: true },
-];
 
 export default function App() {
   const [cfg, setCfg] = useState<api.PublicConfig | null>(null);
   const [user, setUser] = useState<api.User | null>(null);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState("");
+  const [opened, setOpened] = useState<api.Item | null>(null);
+  const [mineKey, setMineKey] = useState(0);        // 상세에서 바꾼 뒤 목록을 다시 읽기 위한 키
 
   useEffect(() => {
     (async () => {
@@ -40,8 +38,7 @@ export default function App() {
     setUser(null);
   }
 
-  const sections = SECTIONS.filter((s) => !s.adminOnly || user?.role === "admin");
-  const [page, setPage] = useState<"home" | "explore" | "approvals">("explore")
+  const [page, setPage] = useState<"home" | "explore" | "approvals" | "admin">("explore")
   // 메일 링크(/approvals/<recordId>)로 들어오면 로그인 후 해당 record 검토 화면을 연다
   const [openRec, setOpenRec] = useState<string | null>(() => {
     const m = location.pathname.match(/^\/approvals\/([A-Za-z0-9_-]{6,64})$/);
@@ -65,6 +62,7 @@ export default function App() {
         <nav className="nav" aria-label="주 메뉴">
           <button className={page === "explore" ? "on" : ""} onClick={() => setPage("explore")}>레지스트리 탐색</button>
           {user.role === "admin" && <button className={page === "approvals" ? "on" : ""} onClick={() => setPage("approvals")}>승인</button>}
+          {user.role === "admin" && <button className={page === "admin" ? "on" : ""} onClick={() => setPage("admin")}>관리</button>}
           <button className={page === "home" ? "on" : ""} onClick={() => setPage("home")}>내 정보</button>
         </nav>
       )}
@@ -84,6 +82,8 @@ export default function App() {
           ? <Approvals openId={openRec} onOpened={() => { setOpenRec(null); setPage("approvals"); history.replaceState(null, "", "/"); }} />
           : <section className="card"><h2>권한이 없습니다</h2><p className="sub">승인은 관리자만 할 수 있습니다. 관리자 계정으로 다시 로그인하세요.</p>
               <button className="btn ghost" onClick={onLogout}>로그아웃</button></section>
+      ) : page === "admin" && user.role === "admin" ? (
+        <AdminDashboard />
       ) : page === "explore" ? (
         <Explore user={user} />
 
@@ -97,15 +97,10 @@ export default function App() {
               <div><dt>역할</dt><dd><span className={`badge ${user.role}`}>{ROLE_LABEL[user.role]}</span></dd></div>
             </dl>
           </section>
-          <div className="grid">
-            {sections.map((s) => (
-              <section className="card tile" key={s.title}>
-                <h2>{s.title}{s.adminOnly && <span className="badge admin">관리자</span>}</h2>
-                <p>{s.desc}</p>
-                <span className="soon">준비 중</span>
-              </section>
-            ))}
-          </div>
+          <MyRecords key={mineKey} onOpen={setOpened} isAdmin={user.role === "admin"} />
+          {opened && user && <DetailModal item={opened} user={user} onClose={() => setOpened(null)}
+            onChanged={(it) => { setOpened(it); setMineKey((k) => k + 1); }}
+            onDeleted={() => { setOpened(null); setMineKey((k) => k + 1); }} />}
         </>
       )}
     </main>

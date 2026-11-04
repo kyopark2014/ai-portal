@@ -14,7 +14,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from . import auth, aws, catalog, db
+from . import admins, auth, aws, catalog, db
 
 router = APIRouter(prefix="/api/approvals")
 _ID = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
@@ -71,7 +71,9 @@ def queue(status: Literal["PENDING_APPROVAL", "APPROVED", "REJECTED", "DEPRECATE
     except (ClientError, BotoCoreError) as e:
         raise catalog.aws_err(e)
     out.sort(key=lambda x: x.get("updatedAt") or 0, reverse=True)
-    return {"records": [{**_summary(x), "portal": _portal_item(x["recordId"])} for x in out], "registryId": rid}
+    asg = admins.assignments()
+    return {"records": [{**_summary(x), "portal": _portal_item(x["recordId"]), "approver": asg.get(x["recordId"]),
+                         "can_decide": admins.can_decide(x["recordId"], user.email)} for x in out], "registryId": rid}
 
 
 @router.get("/{record_id}")
@@ -96,7 +98,8 @@ def detail(record_id: str, user: auth.User = Depends(require_admin)):
         except ValueError:
             content = inline
     return {**_summary(r), "statusReason": r.get("statusReason", ""), "content": content,
-            "portal": _portal_item(record_id), "registryId": rid}
+            "portal": _portal_item(record_id), "registryId": rid,
+            "approver": admins.assignments().get(record_id), "can_decide": admins.can_decide(record_id, user.email)}
 
 
 class DecisionIn(BaseModel):
@@ -107,6 +110,9 @@ class DecisionIn(BaseModel):
 @router.post("/{record_id}/decision")
 def decide(record_id: str, body: DecisionIn, user: auth.User = Depends(require_admin)):
     rid, rec = _registry_id(), _record_id(record_id)
+    if not admins.can_decide(rec, user.email):
+        who = admins.assignments().get(rec)
+        raise HTTPException(403, f"이 요청은 지정된 승인자({who})만 처리할 수 있습니다")
     if body.decision == "REJECTED" and not body.reason.strip():
         raise HTTPException(422, "거절 사유를 입력하세요")
     client = aws.registry_client()
@@ -124,7 +130,86 @@ def decide(record_id: str, body: DecisionIn, user: auth.User = Depends(require_a
         client.update_registry_record_status(registryId=rid, recordId=rec, status=body.decision, statusReason=reason)
     except (ClientError, BotoCoreError) as e:
         raise catalog.aws_err(e)
+    try:
+        admins.clear_assignment(rec)
+    except Exception:  # noqa: BLE001 — 정리는 best effort
+        pass
     item = _portal_item(rec)
     if item:    # 포털 항목의 표시 상태를 맞춘다
         db.update_item(item["id"], registry_status=body.decision)
     return {"recordId": rec, "status": body.decision, "statusReason": reason}
+
+
+class AdminIn(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+
+
+admins_router = APIRouter(prefix="/api/admins")
+
+
+@admins_router.get("")
+def list_admins(user: auth.User = Depends(require_admin)):
+    return {"admins": admins.listing(), "me": user.email}
+
+
+@admins_router.post("")
+def add_admin(body: AdminIn, user: auth.User = Depends(require_admin)):
+    try:
+        admins.add(body.email)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except (ClientError, BotoCoreError) as e:
+        raise catalog.aws_err(e)
+    return {"admins": admins.listing(), "me": user.email}
+
+
+@admins_router.delete("")
+def remove_admin(email: str, user: auth.User = Depends(require_admin)):
+    if email.strip().lower() == user.email.lower():
+        raise HTTPException(422, "자기 자신은 삭제할 수 없습니다")
+    try:
+        admins.remove(email)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except (ClientError, BotoCoreError) as e:
+        raise catalog.aws_err(e)
+    return {"admins": admins.listing(), "me": user.email}
+
+
+# ── 관리자 대시보드: 접속한 사람 + 레지스트리 등록 현황 ─────────────────────────
+dashboard_router = APIRouter(prefix="/api/admin")
+_DESCRIPTOR_KIND = {"MCP": "mcp", "A2A": "agent", "AGENT_SKILLS": "skill", "CUSTOM": "prompt"}
+
+
+@dashboard_router.get("/dashboard")
+def dashboard(user: auth.User = Depends(require_admin)):
+    """접속 통계 + 사용자별 등록 현황(종류·상태) + Registry 전체의 종류별·상태별 현황.
+
+    사용자별 수치는 포털 DB(소유자 기준)에서, Registry 현황은 Registry 를 직접 조회해서 낸다
+    (포털 밖에서 등록된 record 와 소유자를 알 수 없는 복원 항목도 빠지지 않게).
+    """
+    users = db.user_stats()
+    admin_set = admins.all_admins()
+    for u in users:
+        u["is_admin"] = u["email"] in admin_set
+    by_type: dict[str, dict[str, int]] = {}
+    registry_error = ""
+    try:
+        rid = _registry_id()
+        token = None
+        while True:
+            r = aws.registry_client().list_registry_records(registryId=rid, **({"nextToken": token} if token else {}))
+            for rec in r.get("registryRecords", []):
+                kind = _DESCRIPTOR_KIND.get(rec["descriptorType"], rec["descriptorType"].lower())
+                by_type.setdefault(kind, {})
+                by_type[kind][rec["status"]] = by_type[kind].get(rec["status"], 0) + 1
+            token = r.get("nextToken")
+            if not token:
+                break
+    except HTTPException as e:
+        registry_error = str(e.detail)
+    except (ClientError, BotoCoreError) as e:
+        registry_error = catalog.aws_err(e).detail
+    return {"totals": db.login_totals(), "users": users, "recent_logins": db.recent_logins(30),
+            "registry": {"by_type": by_type, "total": sum(sum(v.values()) for v in by_type.values()), "error": registry_error},
+            "admins": sorted(admin_set)}

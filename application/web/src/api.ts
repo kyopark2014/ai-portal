@@ -51,7 +51,8 @@ export const selectRegistry = (registry_id: string) => callErr<unknown>("/api/re
 export const createRegistry = (body: unknown) => callErr<unknown>("/api/registries", json("POST", body));
 export const registerItem = (kind: Kind, id: number) => callErr<Item>(`/api/catalog/${kind}/${id}/register`, json("POST"));
 export const refreshRegistry = (kind: Kind, id: number) => callErr<Item & { registry_reason: string }>(`/api/catalog/${kind}/${id}/registry/refresh`, json("POST"));
-export const submitRegistry = (kind: Kind, id: number) => callErr<Item>(`/api/catalog/${kind}/${id}/registry/submit`, json("POST"));
+export const submitRegistry = (kind: Kind, id: number, approver = "") => callErr<Item>(`/api/catalog/${kind}/${id}/registry/submit`, json("POST", { approver }));
+export const listApprovers = () => callErr<{ approvers: { email: string }[] }>("/api/approvers");
 
 // ── prompt 테스트 (Gateway) ──
 export interface GwModel { id: string; provider: string; endpoint: "chat" | "messages" | null; usable: boolean }
@@ -91,6 +92,7 @@ export interface RegRecord {
   recordId: string; name: string; description: string; descriptorType: string; status: string;
   recordVersion: string; createdAt: string | null; updatedAt: string | null;
   portal: { id: number; kind: Kind; name: string; owner: string } | null;
+  approver?: string | null; can_decide?: boolean;
 }
 export interface RegDetail extends RegRecord { statusReason: string; content: unknown; registryId: string }
 export const listApprovals = (status: RecStatus = "PENDING_APPROVAL") =>
@@ -152,3 +154,26 @@ export async function streamAgentChat(
   }
 }
 export const streamSkillChat: typeof streamMcpChat = (id, body, onEvent, signal) => streamMcpChat(id, body, onEvent, signal, "skills");
+
+// ── 내 레코드 ──
+export const myRecords = () => callErr<{ items: Item[]; counts: Record<string, number>; total: number }>("/api/my/records");
+
+// ── 관리자(승인 가능한 사람) 관리 ──
+export interface AdminEntry { email: string; removable: boolean }
+export const listAdmins = () => callErr<{ admins: AdminEntry[]; me: string }>("/api/admins");
+export const addAdmin = (email: string) => callErr<{ admins: AdminEntry[]; me: string }>("/api/admins", json("POST", { email }));
+export const removeAdmin = (email: string) => callErr<{ admins: AdminEntry[]; me: string }>(`/api/admins?email=${encodeURIComponent(email)}`, json("DELETE"));
+
+// ── 관리자 대시보드 / 레지스트리 관리 ──
+export interface UserStat {
+  email: string; name: string; login_count: number; first_login: number | null; last_login: number | null;
+  kinds: Record<string, Record<string, number>>; statuses: Record<string, number>; total: number; is_admin: boolean;
+}
+export interface Dashboard {
+  totals: { total_logins: number; unique_users: number; active_7d: number };
+  users: UserStat[]; recent_logins: { email: string; name: string; logged_at: number }[];
+  registry: { by_type: Record<string, Record<string, number>>; total: number; error: string }; admins: string[];
+}
+export const adminDashboard = () => callErr<Dashboard>("/api/admin/dashboard");
+export const myRecordsAll = () => callErr<{ items: Item[]; counts: Record<string, number>; total: number }>("/api/my/records?scope=all");
+export const registryDefaults = () => callErr<{ authorizer: "AWS_IAM" | "CUSTOM_JWT"; auto_approval: boolean }>("/api/registries/defaults");

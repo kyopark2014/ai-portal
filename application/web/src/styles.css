@@ -153,3 +153,22 @@ body{margin:0;min-height:100vh;color:var(--ink);font-family:var(--body);
 /* 긴 식별자(ARN·URL)는 격자 한 칸이 아니라 한 줄 전체를 쓰고, 한 줄에 못 들어가면 글자 단위가 아니라 구분자(: / -)에서 줄바꿈 */
 .kv .wide-row{grid-column:1 / -1}
 .kv dd.arn{overflow-wrap:break-word;word-break:normal;line-height:1.5;user-select:all}
+
+/* 내 레코드 */
+.hint.clip{max-width:34rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+td strong{font-weight:600}
+.badge.st-{background:#e3eaee;color:var(--soft)}
+
+/* 승인자 관리 / 승인 요청 시 승인자 선택 */
+.adm-list{list-style:none;margin:.4rem 0 1rem;padding:0;display:grid;gap:.4rem}
+.adm-list li{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;padding:.5rem .7rem;border:1px solid var(--line);border-radius:10px;background:var(--paper)}
+.adm-list li .link{margin-left:auto}
+.field.inline{display:inline-grid;margin-right:.6rem;min-width:220px}
+
+/* 관리 대시보드 */
+.stats{margin-bottom:1.1rem}
+.counts{display:flex;gap:.3rem;flex-wrap:wrap}
+.counts .badge{white-space:nowrap}
+td .hint{margin:.1rem 0 0}
+.head{display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:.4rem}
+.head h2{margin:0}

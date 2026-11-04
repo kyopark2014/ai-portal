@@ -48,7 +48,9 @@ def admin_emails() -> set[str]:
 
 
 def role_for(email: str) -> str:
-    return "admin" if email.lower() in admin_emails() else "user"
+    """관리자 = 환경 변수의 최초 관리자 + 화면에서 추가한 관리자(SSM). 매 요청마다 계산하므로 추가/제거가 바로 반영된다."""
+    from . import admins
+    return "admin" if admins.is_admin(email) else "user"
 
 
 def max_age() -> int:

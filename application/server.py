@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agent_test, approvals, auth, catalog, chat, mcp_test
+from . import agent_test, approvals, auth, catalog, chat, db, mcp_test
 
 DIST = Path(__file__).resolve().parent / "web" / "dist"
 _docs = os.environ.get("ENABLE_API_DOCS") == "1"
@@ -73,6 +73,10 @@ def login_google(body: GoogleLogin, request: Request, response: Response):
         auth.COOKIE_NAME, cookie, max_age=auth.max_age(),
         httponly=True, secure=secure, samesite="lax", path="/",
     )
+    try:    # 접속 기록(통계용)은 로그인을 막지 않는다. 이메일·이름만 저장한다.
+        db.record_login(email, claims.get("name") or "")
+    except Exception:  # noqa: BLE001
+        pass
     catalog.start_sync()  # 최초 로그인 시 AWS 정보를 백그라운드로 갱신
     return _user_json(auth.read_session(cookie))
 
@@ -99,6 +103,8 @@ app.include_router(chat.router)
 app.include_router(mcp_test.router)
 app.include_router(agent_test.router)
 app.include_router(approvals.router)
+app.include_router(approvals.admins_router)
+app.include_router(approvals.dashboard_router)
 
 
 # ── SPA ──
