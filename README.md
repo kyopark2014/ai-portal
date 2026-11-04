@@ -17,6 +17,79 @@ Prompt · MCP · Agent · Skill 을 카탈로그로 탐색·등록하고, 등록
                     └─ AWSome AI Gateway (프롬프트 테스트: ChatAnthropic / ChatOpenAI)
 ```
 
+## AgentCore Registry
+
+**AWS Agent Registry**는 Amazon Bedrock AgentCore 안에 있는 **중앙 카탈로그**입니다. 조직 곳곳에 흩어진 MCP 서버·에이전트·스킬 같은 리소스를 한곳에 **등록하고, 검색하고, 승인(거버넌스)** 할 수 있습니다. 2026년 4월 프리뷰로 시작해 정식 출시되었고 `agent-registry` 네임스페이스를 씁니다(프리뷰의 `bedrock-agentcore` 네임스페이스는 2026-10-30 에 지원이 끝났습니다).
+
+**해결하는 문제**
+- **중앙화된 발견**: 리소스를 한곳에서 찾습니다.
+- **승인 기반 큐레이션**: 보안·컴플라이언스·품질 기준을 통과한 레코드만 검색되게 합니다.
+- **중복(sprawl) 방지**: 비슷한 에이전트가 따로따로 만들어지는 것을 줄입니다.
+
+**등록할 수 있는 리소스**: MCP 서버 · 에이전트(A2A, Agent Card 스키마 0.3) · 스킬 · 커스텀 리소스. 이 포털은 MCP→`MCP`, Agent→`A2A`, Skill→`AGENT_SKILLS`, Prompt→`CUSTOM` descriptor 로 등록합니다(아래 [기능](#기능) 참조).
+
+### 레코드 라이프사이클
+
+```
+CreateRegistryRecord ─▶ DRAFT ─ SubmitRegistryRecordForApproval ─▶ PENDING_APPROVAL
+                                                                      │  UpdateRegistryRecordStatus (관리자)
+                                                  ┌───────────────────┼───────────────┐
+                                              APPROVED            REJECTED        (승인 후) DEPRECATED
+                                           (검색·사용 가능)
+```
+
+1. Registry 를 만듭니다(인증 방식 선택, auto-approval 켜기/끄기).
+2. `CreateRegistryRecord` 로 레코드를 등록합니다. 처음에는 잠깐 `CREATING` 이었다가 `DRAFT` 가 됩니다.
+3. `SubmitRegistryRecordForApproval` 로 승인을 요청하면 `PENDING_APPROVAL` 이 됩니다.
+4. 큐레이터가 `UpdateRegistryRecordStatus` 로 `APPROVED`(또는 `REJECTED`, 승인 후 `DEPRECATED`)로 바꿉니다.
+5. 사람이나 에이전트가 **승인된 레코드만** 검색해 사용합니다.
+
+조회 API: `SearchRegistryRecords`(하이브리드 검색), `ListDiscoverableRegistryRecords`(타입별 목록), `BatchGetDiscoverableRegistryRecord`(상세). URL 기반 **synchronization** 을 쓰면 라이브 MCP 서버의 도구 정의가 바뀔 때 메타데이터를 자동으로 맞춥니다.
+
+### 핵심 기능
+- **인증**: IAM 또는 JWT(OIDC/Cognito) 중에서 Registry 마다 선택합니다.
+- **auto-approval**: Registry 를 만들 때 켜거나 끌 수 있는 승인 설정입니다(`approvalConfiguration.autoApproval`). 이 포털은 **끄고** 수동 승인(위 라이프사이클)을 씁니다.
+- **하이브리드 검색**: 시맨틱 검색과 키워드 검색을 함께 수행합니다.
+- **MCP 엔드포인트**: Registry 자체가 MCP 엔드포인트라서 에이전트가 직접 검색할 수 있습니다.
+
+### 역할 분리
+
+| 역할 | 하는 일 | 필요한 권한 |
+|---|---|---|
+| Administrator | Registry 생성, 인증 방식 결정, EventBridge 연동, IAM 관리 | — |
+| Publisher | 레코드 작성, 승인 요청 | `CreateRegistryRecord`, `SubmitRegistryRecordForApproval` |
+| Curator / Approver | 검토 후 승인·거절·deprecate | `UpdateRegistryRecordStatus` |
+| Consumer | 승인된 레코드 검색·조회·MCP 연결 | 검색/목록 API |
+
+Publisher 에게 `UpdateRegistryRecordStatus` 를 주지 않으면 **자기 승인**을 막을 수 있습니다. 이 포털은 같은 원칙을 앱 수준에서 적용합니다 — 승인·거절·deprecate 는 관리자만 할 수 있고(서버가 판단), 일반 사용자는 등록과 승인 요청만 합니다.
+
+### 승인 알림
+승인 요청이 왔다는 사실을 큐레이터에게 알리는 방법은 세 단계입니다.
+
+| 단계 | 구성 | 이 포털 |
+|---|---|---|
+| 기본 | EventBridge → SNS 이메일 | **사용 중** (아래 [AWS 리소스](#aws-리소스-installerpy)) |
+| 중간 | EventBridge → Lambda → Slack/Teams | — |
+| 고급 | Step Functions `waitForTaskToken` — 자동 사전 검사, 승인 버튼, 결과 반영(Inspector·GuardDuty 검사 연동 가능) | — |
+
+### 알아둘 점
+- **승인은 "검색에 노출되는가"만 정합니다.** Runtime·Gateway 의 실제 호출 권한은 IAM/OAuth 로 따로 관리해야 합니다.
+- **가시성은 Registry 단위입니다.** Search/List 권한은 Registry 전체에 적용되므로, 일부 레코드를 특정 사용자에게만 숨기려면 Registry 를 나눠야 합니다. (이 포털은 한 Registry 를 쓰고, 포털 DB 에서 "내가 만든 것 + 승인된 것"만 보이게 따로 거릅니다.)
+- 모든 API 호출은 **CloudTrail** 에 기록되고, `statusReason` 에 승인자 정보를 남길 수 있습니다(이 포털은 `[by 이메일]` 을 남깁니다).
+- 여러 계정에서 공유하려면 **AWS RAM** 또는 **Organizations** 를 씁니다.
+
+### 모범 사례 (Well-Architected)
+- **AGENTREL04-BP02** — 에이전트를 역량 카테고리·스킬·제약·성능 프로필과 함께 등록하고, 오케스트레이터는 하드코딩된 식별자 대신 **시맨틱 검색**으로 에이전트를 찾습니다. 배포 파이프라인(CI/CD)에서 Registry 를 갱신해 **registry drift** 를 막습니다.
+- **AGENTOPS01-BP02** — 핸드오프 때 Registry 로 피어의 존재·역량·작업 수용 가능 여부를 파악하고, Gateway 와 결합해 상호작용을 감사 가능하게 만듭니다. 에이전트→에이전트 에스컬레이션과 에이전트→사람 에스컬레이션은 **분리해서** 설계합니다.
+- **툴 쿼터 거버넌스 패턴** — 쿼터 정책을 레코드의 커스텀 메타데이터에 두고 `schema_version` 으로 버전을 관리합니다. 쿼터 메타데이터가 없는 레코드는 자동 승인하지 않습니다. Registry 에 접근할 수 없을 때는 기본은 fail-open, 고비용·고위험 도구는 fail-closed 로 합니다.
+
+### 참고 링크
+- [Registry 개요](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/registry.html) · [시작하기](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/registry-get-started.html) · [사용 사례](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/registry-use-cases.html) · [주요 기능](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/registry-key-capabilities.html)
+- [EventBridge 알림](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/registry-eventbridge.html) · [IAM 권한](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/registry-iam-permissions.html) · [FAQ·마이그레이션](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/registry-faq.html)
+- [툴 접근 거버넌스(Prescriptive Guidance)](https://docs.aws.amazon.com/prescriptive-guidance/latest/patterns/govern-tool-access-with-aws-agent-registry-metadata.html) · [AGENTREL04-BP02](https://docs.aws.amazon.com/wellarchitected/latest/agentic-ai-lens/agentrel04-bp02.html) · [AGENTOPS01-BP02](https://docs.aws.amazon.com/wellarchitected/latest/agentic-ai-lens/agentops01-bp02.html)
+
+---
+
 ## 로컬 실행
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
@@ -101,7 +174,6 @@ python installer.py --skip-docker-build    # 이미지 재빌드 없이
 | `GET /api/admin/ping` | 관리자 전용 골격 |
 
 ## 알아둘 제약
-- **커스텀 도메인**: `portal.my-agentic-ai.click`. Route53 호스팅 영역(`my-agentic-ai.click.`)이 **다른 AWS 계정(AWS CLI 프로파일 `stock`)** 에 있어서, 인증서·CloudFront 는 배포 계정에, DNS 레코드는 `stock` 계정에 만듭니다(`installer.py` 의 `DOMAIN`/`DNS_PROFILE`). 흐름: ACM 인증서(us-east-1, DNS 검증 CNAME 을 stock 영역에 등록) → CloudFront 별칭+인증서(SNI, TLS1.2_2021) → `portal` A/AAAA 별칭을 CloudFront 로. 같은 영역의 다른 레코드는 건드리지 않습니다. 새 도메인은 DNS 캐시 때문에 일부 네트워크에서 늦게 열릴 수 있습니다. 서버의 `PORTAL_ORIGIN` 환경 변수는 다음 재배포 때 새 도메인으로 갱신됩니다(승인 메일 링크는 이미 새 도메인).
 - **배포본과 로컬의 DB 는 별개**: Registry 에 record 가 있어도 포털 항목과의 연결은 각 서버의 SQLite 에 있습니다. 서버는 로그인 시 동기화(Registry 복원 포함)로 채워집니다. 복원된 항목의 소유자는 `registry` 입니다.
 - **배포 중 일시 중단**: 단일 태스크(desired=1, `minimumHealthyPercent=0`)라 재배포 동안(수 분) 503 이 됩니다. 무중단은 태스크 2개 이상 + 영구 저장소가 필요합니다.
 - **동기화 항목의 공개 범위**: AWS 에서 가져온 항목(harness·runtime·Gateway·AWS 의 prompt)은 Registry 에 등록·승인되기 전에는 승인 상태가 없어 일반 사용자에게 보이지 않습니다. 관리자가 Registry 에 등록해 승인해야 공개됩니다. 포털의 승인 상태는 "상태 확인"·승인 처리 때만 갱신되므로 AWS 콘솔에서 직접 처리하면 늦게 반영됩니다.
