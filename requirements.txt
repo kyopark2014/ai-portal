@@ -1,0 +1,9 @@
+fastapi>=0.134.0
+uvicorn[standard]
+google-auth>=2.30.0
+requests
+pytest
+httpx
+boto3>=1.43.123
+langchain-anthropic
+langchain-openai

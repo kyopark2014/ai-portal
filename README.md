@@ -1,0 +1,127 @@
+# AI Portal
+
+AWS Agent Registry(Amazon Bedrock AgentCore)의 기능을 UI와 함께 보여주는 웹.
+Prompt · MCP · Agent · Skill 을 카탈로그로 탐색·등록하고, 등록 정보는 Agent Registry 로 관리합니다.
+
+- 구조: FastAPI REST(`/api/*`) + React(Vite) SPA, 한 컨테이너(:8501)로 ECS 배포 (agentic-work 방식)
+- 로그인: Google. 관리자는 `ADMIN_EMAILS`(기본 `e2npark@gmail.com`), 그 외 로그인 사용자는 일반 사용자
+- 저장소: SQLite(`application/data/portal.db`) — 목록·설명·Registry 연결 정보
+
+```
+브라우저 ─ Google ID token ─▶ POST /api/auth/google ─▶ HttpOnly 서명 쿠키
+        ─ 쿠키 ─▶ /api/catalog/* , /api/chat (SSE)
+                    │
+                    ├─ Bedrock Prompt Management  (prompt 본문·버전)
+                    ├─ AgentCore Registry `ai-portal` (등록 record)
+                    ├─ AgentCore control (harness / runtime 동기화)
+                    └─ AWSome AI Gateway (프롬프트 테스트: ChatAnthropic / ChatOpenAI)
+```
+
+## 로컬 실행
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cp .env.example .env     # GOOGLE_CLIENT_ID, LLM_GATEWAY_KEY 등 입력
+./run_local.sh           # http://localhost:8501  (프런트 빌드 + uvicorn)
+```
+- Google Cloud Console → OAuth client → **Authorized JavaScript origins** 에 `http://localhost:8501` 과 배포 오리진을 추가해야 로그인됩니다.
+- 프런트만 개발: `cd application/web && npm run dev` (:5173, `/api` 는 :8501 로 프록시)
+- 테스트: `.venv/bin/python -m pytest` (테스트는 실제 AWS 를 호출하면 실패하도록 막혀 있음)
+- AWS 자격 증명과 리전(`AWS_REGION`, 기본 `us-west-2`)이 필요합니다.
+
+## 환경 변수 (`.env.example`)
+| 변수 | 설명 |
+|---|---|
+| `GOOGLE_CLIENT_ID` | Google OAuth Web client ID (공개 값) |
+| `ADMIN_EMAILS` | 쉼표 구분 관리자 이메일 (승인 알림 수신자도 이 값) |
+| `SESSION_SIGNING_KEY` | 세션 쿠키 서명 키. 비우면 로컬에 자동 생성. ECS 는 Secrets Manager 로 주입 |
+| `COOKIE_SECURE` | https 뒤에서는 `1` |
+| `LLM_GATEWAY_URL` / `LLM_GATEWAY_KEY` | 프롬프트 테스트용 AWSome AI Gateway. 키는 서버에만 있고 브라우저로 나가지 않음 |
+| `HARNESS_ARN` | (선택) MCP 테스트 harness. 기본은 `application/config.json` 의 `harness_arn` |
+| `PORTAL_ORIGIN` | 승인 요청 메일의 링크 기준 주소(배포 오리진). 비우면 `config.json` 의 `sharing_url`, 없으면 `http://localhost:8501` |
+| `GATEWAY_REGIONS` | MCP Gateway 를 가져올 리전(쉼표 구분). 비우면 `AWS_REGION` + us-east-1 |
+| `REGISTRY_ID` | (선택) Registry 지정. 기본은 `application/config.json` 의 `registry_id` |
+| `PORTAL_DB_PATH` | (선택) SQLite 경로 |
+
+## 기능
+
+**레지스트리 탐색** — Prompt / MCP / Agent / Skill 탭. 카드(`⋮` 메뉴: Open·Delete) / 목록 보기, 검색, "내가 만든 것" 필터.
+등록하면 **한 번에** 저장과 Registry 등록이 끝납니다. Registry 등록만 실패하면 항목은 남고 상세 화면에서 재시도합니다.
+
+| 종류 | 등록 | Registry descriptor | 비고 |
+|---|---|---|---|
+| Prompt | Bedrock Prompt Management 에 저장 → 불변 버전 게시 | `CUSTOM` (본문 없이 `promptArn`·`version`·`versionArn` 포인터만) | `{{변수}}` 자동 인식. 수정 시 새 버전 게시 후 record 포인터 갱신 |
+| MCP | Endpoint URL + HTTP 헤더 직접 등록, 또는 **AgentCore Gateway 자동 가져오기** | `MCP` | 헤더 값은 목록/상세에서 마스킹. 직접 등록한 MCP 만 연결 테스트(`tools/list`). Gateway 는 IAM/JWT 인증이라 상세 정보만 표시. 사용 승인 흐름은 추후 |
+| Agent | AgentCore harness·runtime 자동 동기화 + 직접 추가 | `A2A` | 설명 편집 가능 |
+| Skill | Git(URL·subdirectory·credential ARN·user) 또는 S3(URI·version) | `AGENT_SKILLS` | 설명 기본값=Git/S3 정보, 등록 시 수정 가능. 이름은 소문자·숫자·하이픈으로 변환 |
+
+- **동기화**: 로그인 시 백그라운드로 prompt(`list_prompts`/`get_prompt`), harness, runtime, **MCP Gateway(`list_gateways`/`get_gateway`, 현재 리전 + us-east-1)** 를 가져와 SQLite 에 upsert (5분 최소 간격, "새로고침"으로 수동). 사용자가 고친 설명은 덮어쓰지 않고, AWS 에서 사라진 동기화 항목은 제거.
+- **프롬프트 테스트**: Prompt 를 Open → 상세 화면의 "테스트". 모델 선택 후 대화(SSE 스트리밍, 멀티턴). Prompt 가 system 메시지로 적용되며 변수 입력 가능. Claude → `ChatAnthropic`(`/v1/messages`, Bearer 헤더), 그 외 → `ChatOpenAI`(`/v1/chat/completions`, `max_completion_tokens`). Responses 전용 모델은 "지원 불가".
+- **MCP 테스트**: MCP 를 Open → 상세 화면의 "테스트". harness agent `ai_portal` 이 선택한 MCP 를 그 호출의 도구로(또는 Skill 을 `skills` 로) 붙여 대화하고(SSE), 응답과 함께 **도구 호출·도구 결과**를 접이식으로 보여줍니다. IAM Gateway → `agentcore_gateway` 도구(harness 실행 역할이 SigV4 로 호출), 직접 등록한 MCP → `remote_mcp` 도구(URL + 헤더). `CUSTOM_JWT` Gateway 는 토큰이 필요해 지원하지 않음(422). 사용자 이메일은 해시한 `u-…` 값으로만 AWS(actorId)에 전달하고, 세션 ID 에 사용자를 섞어 다른 사용자의 세션을 재사용하지 못하게 합니다.
+- **Skill 테스트**: Skill 을 Open → 상세 화면의 "테스트". MCP 테스트와 같은 방식으로 harness `ai_portal` 의 `skills` 에 선택한 skill 을 붙여 대화하고, `skills` 도구로 skill 을 불러오는 과정과 작업 결과를 보여줍니다. Git → `{git: {url, path, auth}}`, S3 → `{s3: {uri}}`. harness 는 `git clone` 을 하므로 GitHub 웹 주소(`…/tree/main/skills/docx`)는 **repo URL + 하위 경로로 분리**해서 보냅니다(subdirectory 를 따로 적으면 그것이 우선). `https://` 만 허용.
+- **harness system prompt**: harness `ai_portal` 을 실행하는 모든 테스트(MCP·Skill·harness 종류 Agent)는 prompt 를 따로 지정하지 않으면 **`harness_prompt`**(Prompt Management 에 등록한 prompt)를 `systemPrompt` 로 씁니다. 테스트 화면의 "System prompt" 에서 다른 prompt 를 고르면 그것이 우선합니다(요청의 `prompt_id`). 기본 prompt 는 **승인(APPROVED)된 경우에만** 적용하고(미승인 내용이 모두에게 퍼지지 않게), 없거나 승인되지 않았으면 harness 자체 기본값을 씁니다. 본문은 포털 DB 사본이 아니라 Prompt Management 에서 읽어 수정이 바로 반영됩니다(현재 `DRAFT` 버전). 기본 prompt 를 읽지 못하면 조용히 harness 기본값으로, 사용자가 직접 고른 prompt 를 읽지 못하면 오류로 응답합니다. runtime 종류 Agent(`agentic_work` 등)에는 적용하지 않습니다. `{{변수}}` 가 있는 prompt 를 고르면 값이 채워지지 않은 채 전달됩니다.
+- **Agent 테스트**: Agent 를 Open → 상세 화면의 "테스트"에서 프롬프트를 보내면 해당 agent 를 호출하고 응답과 도구 호출/결과를 보여줍니다. harness → `InvokeHarness`, runtime(HTTP) → `InvokeAgentRuntime`(agentic-work 와 같은 `prompt` payload, `model_name` 은 보내지 않아 agent 기본 모델 사용, 이전 대화는 프롬프트에 이어 붙임). MCP 프로토콜 runtime 은 MCP 서버라 MCP 탭에서 테스트. harness 가 만든 내부 runtime(`harness_*`)은 직접 호출 불가라 동기화에서 제외.
+- **Registry 상태**: 상세 화면에서 상태 확인 / 승인 요청 / **승인 요청 취소**.
+- **승인(관리자)**: 상단 "승인" 메뉴 또는 메일 링크(`/approvals/<recordId>`). Registry 를 직접 조회해 대기·승인됨·거절됨·Deprecated 탭으로 보고, record 내용을 검토한 뒤 승인/거절(사유 필수)/Deprecate 합니다. AWS 의 현재 상태를 확인하고 처리해 이중 처리를 막으며(409), 사유에 처리자 이메일(`[by …]`)을 남깁니다. 일반 사용자는 403.
+- **삭제**: Registry record → Prompt Management → 포털 DB 순. record 가 `CREATING` 이면 409(등록 직후 몇 초간 삭제 불가). AWS 동기화 항목은 포털 목록에서만 지워짐.
+- **Registry 기반 복원**: 동기화 마지막 단계(`sync_registry`)가 Registry 의 record 를 읽어 포털 항목과 연결합니다. DB 가 비어 있어도(재배포·신규 서버) 복구되며, 승인 상태도 Registry 에서 가져옵니다. prompt(Prompt Management 포인터)·skill(Git/S3 출처)·agent(ARN)·MCP(URL)를 record 내용에서 복원합니다. 같은 대상의 동기화 항목(prompt·agent·Gateway)이 있으면 그 항목에 연결하고(중복 생성 안 함), 없으면 새로 만듭니다. 이미 연결된 항목은 상태만 갱신하며 사용자가 고친 설명은 덮어쓰지 않습니다. `CREATING`/`UPDATING` 중인 record 와 포털이 만들지 않은 형식의 record 는 건너뜁니다. **복원되지 않는 것**: MCP 의 HTTP 헤더(Registry 에 저장하지 않음), 원래 소유자(→ 소유자 `registry`, 관리자만 수정·삭제).
+- **가시성**: 관리자는 모든 항목을 봅니다. **일반 사용자는 자기가 만든 항목과 Registry 에서 승인(APPROVED)된 항목만** 봅니다(거절·deprecated 된 남의 항목은 숨김, 내가 만든 항목은 상태와 무관하게 보임). 목록·검색뿐 아니라 ID 로 접근하는 모든 API(수정·삭제·등록·테스트 등)에 같은 규칙을 적용하며, 숨겨진 항목은 403 이 아니라 404 로 응답해 존재 여부를 알리지 않습니다. 승인된 남의 항목은 보고 테스트에 쓸 수 있지만 수정·삭제는 불가.
+- **권한**: 수정·삭제·등록은 소유자 또는 관리자. Registry 생성·선택은 관리자만.
+
+## AWS 리소스 (`installer.py`)
+```bash
+python installer.py --registry-only        # Registry `ai-portal` 만
+python installer.py --notifications-only   # 승인 요청 메일 알림만
+python installer.py --harness-only         # MCP 테스트용 harness agent `ai_portal` 만
+python installer.py --domain-only          # 커스텀 도메인(인증서·CloudFront 별칭·DNS)만
+python installer.py                        # 전체 (VPC·ALB·ECR·ECS Fargate·CloudFront)
+python installer.py --skip-docker-build    # 이미지 재빌드 없이
+```
+- **Harness agent `ai_portal`**: MCP 테스트용(`harness-work` 방식). `harnessName` 은 하이픈 불가라 `ai_portal`. 모델 `us.anthropic.claude-sonnet-5-5`, 전용 역할 `role-harness-for-ai-portal-us-west-2`(Bedrock 모델 호출 + `InvokeGateway` + harness 메모리). ID/ARN 은 `application/config.json`(`harness_id`, `harness_arn`) (값은 `config.json` 의 `harness_id` 참조). 도구는 호출마다 지정하므로 harness 자체는 MCP 와 무관합니다.
+- **Registry `ai-portal`**: IAM 인증, auto-approval 꺼짐. ID 는 `application/config.json`(`registry_id`)에 기록 (us-west-2, 값은 `config.json` 의 `registry_id` 참조).
+- **승인 요청 메일(Basic)**: EventBridge 규칙 `ai-portal-approval-requested`(`Registry Record State changed to Pending Approval`, 이 Registry 만) → SNS `ai-portal-approval-requests` → `ADMIN_EMAILS`. **수신자가 SNS 확인 메일의 "Confirm subscription" 을 눌러야** 메일이 옵니다. 메일 본문에 승인 링크(`{PORTAL_ORIGIN}/approvals/<recordId>`)가 들어가며, 링크 주소를 바꾸려면 `PORTAL_ORIGIN` 설정 후 `--notifications-only` 를 다시 실행합니다(전체 설치 시에는 CloudFront 주소로 자동 설정). EventBridge 는 줄바꿈이 든 InputTemplate 을 거부하므로 메일 본문은 한 줄입니다.
+- **전체 설치(실행됨, 2026-11-04)**: 새 VPC `10.23.0.0/16`, ALB(보안 그룹이 CloudFront origin-facing prefix list 의 80 만 허용 → 인터넷에서 ALB 직접 접속 불가, 안쪽은 `X-Origin-Verify` 비밀 헤더), ECR(arm64), ECS Fargate desired=1, CloudFront(HTTPS 강제·보안 헤더), Secrets Manager(`ai-portal/session-signing-key`, `llm-gateway-key`). **배포 URL: https://portal.my-agentic-ai.click** (`config.json` 의 `sharing_url`; CloudFront 기본 주소(`config.json` 의 `cloudfront_domain`)도 계속 동작). 사용하는 주소를 Google OAuth client 의 **Authorized JavaScript origins** 에 추가해야 로그인됩니다. 이미지에는 `config.json` 이 들어가지 않으므로 Registry ID·harness ARN 은 ECS 환경 변수(`REGISTRY_ID`, `HARNESS_ARN`)로 전달합니다. 보안 그룹 이름은 `sg-` 로 시작할 수 없습니다(AWS 제약). 재배포: 코드 변경 후 `python installer.py`(이미지를 다시 빌드·푸시하고 ECS 를 강제 재배포), 이미지 재빌드 없이 인프라만은 `--skip-docker-build`.
+- ECS task role: Prompt Management, AgentCore 조회·Registry record 권한 (Bedrock 모델 직접 호출 권한은 없음 — 테스트는 Gateway 경유).
+
+## API 요약
+| | |
+|---|---|
+| `GET /api/config` · `POST /api/auth/google` · `GET /api/me` · `POST /api/auth/logout` | 인증 |
+| `GET /api/catalog/{kind}?q=` · `PATCH …/{id}/description` · `DELETE …/{id}` | 목록·설명·삭제 (kind = prompt\|mcp\|agent\|skill) |
+| `POST /api/prompts` · `PUT /api/prompts/{id}` · `POST …/{id}/refresh` | Prompt (Bedrock 저장·수정·재조회) |
+| `POST /api/mcp` · `POST /api/mcp/{id}/test` · `POST /api/skills` · `POST /api/agents` | MCP·Skill·Agent 등록 |
+| `POST /api/catalog/{kind}/{id}/register` · `…/registry/refresh` · `…/registry/submit` · `…/registry/cancel` | Registry 등록·상태·승인 요청·취소 |
+| `GET/POST /api/registries` · `PUT /api/registries/selected` | Registry 목록·생성·선택 (생성·선택은 관리자) |
+| `GET/POST /api/sync` | 동기화 상태·수동 실행 |
+| `GET /api/gateway/models` · `POST /api/chat` | 프롬프트 테스트 (SSE) |
+| (공통) | MCP·Skill·Agent 테스트 요청은 선택 필드 `prompt_id`(harness system prompt)를 받음 |
+| `POST /api/skills/{id}/chat` | Skill 테스트 — harness 에 skill 을 붙여 호출 (SSE) |
+| `POST /api/agents/{id}/chat` | Agent 테스트 — harness/runtime 호출 (SSE) |
+| `GET /api/mcp/test-status` · `POST /api/mcp/{id}/chat` | MCP 테스트 — harness agent (SSE: 텍스트·도구 호출·도구 결과) |
+| `GET /api/approvals?status=` · `GET /api/approvals/{recordId}` · `POST /api/approvals/{recordId}/decision` | 승인 큐·검토·승인/거절/deprecate (관리자 전용) |
+| `GET /api/admin/ping` | 관리자 전용 골격 |
+
+## 알아둘 제약
+- **커스텀 도메인**: `portal.my-agentic-ai.click`. Route53 호스팅 영역(`my-agentic-ai.click.`)이 **다른 AWS 계정(AWS CLI 프로파일 `stock`)** 에 있어서, 인증서·CloudFront 는 배포 계정에, DNS 레코드는 `stock` 계정에 만듭니다(`installer.py` 의 `DOMAIN`/`DNS_PROFILE`). 흐름: ACM 인증서(us-east-1, DNS 검증 CNAME 을 stock 영역에 등록) → CloudFront 별칭+인증서(SNI, TLS1.2_2021) → `portal` A/AAAA 별칭을 CloudFront 로. 같은 영역의 다른 레코드는 건드리지 않습니다. 새 도메인은 DNS 캐시 때문에 일부 네트워크에서 늦게 열릴 수 있습니다. 서버의 `PORTAL_ORIGIN` 환경 변수는 다음 재배포 때 새 도메인으로 갱신됩니다(승인 메일 링크는 이미 새 도메인).
+- **배포본과 로컬의 DB 는 별개**: Registry 에 record 가 있어도 포털 항목과의 연결은 각 서버의 SQLite 에 있습니다. 서버는 로그인 시 동기화(Registry 복원 포함)로 채워집니다. 복원된 항목의 소유자는 `registry` 입니다.
+- **배포 중 일시 중단**: 단일 태스크(desired=1, `minimumHealthyPercent=0`)라 재배포 동안(수 분) 503 이 됩니다. 무중단은 태스크 2개 이상 + 영구 저장소가 필요합니다.
+- **동기화 항목의 공개 범위**: AWS 에서 가져온 항목(harness·runtime·Gateway·AWS 의 prompt)은 Registry 에 등록·승인되기 전에는 승인 상태가 없어 일반 사용자에게 보이지 않습니다. 관리자가 Registry 에 등록해 승인해야 공개됩니다. 포털의 승인 상태는 "상태 확인"·승인 처리 때만 갱신되므로 AWS 콘솔에서 직접 처리하면 늦게 반영됩니다.
+- **Gateway 동기화 범위**: 기본은 `AWS_REGION`(us-west-2) + us-east-1 이며 `GATEWAY_REGIONS`(쉼표 구분)로 바꿉니다. 리전별로 독립 처리해 한 리전 조회가 실패해도 그 리전의 기존 항목은 유지됩니다(같은 Gateway ID 가 리전마다 있어도 구분됨). Gateway 의 target(도구) 목록은 아직 보여주지 않습니다.
+- **승인 요청 취소**: AWS 가 `PENDING_APPROVAL → DRAFT` 되돌림을 지원하지 않고, `REJECTED` 로 바꾸면 재제출이 막힙니다. 그래서 취소는 record 를 **삭제**하고 연결을 비웁니다(다시 등록해야 함). 이미 간 알림 메일은 회수되지 않습니다. Prompt 본문·버전은 Prompt Management 에 남습니다.
+- **승인의 의미**: 승인은 Registry 검색에 노출될지만 정합니다. 승인된 MCP·agent 의 실제 사용 권한(IAM/OAuth)은 별도입니다. 메일 링크는 로그인한 관리자만 열 수 있어 전달돼도 일반 사용자는 승인할 수 없습니다.
+- **Registry 삭제와 Prompt**: 삭제는 record 를 먼저 지워 "가리키는 대상 없는 record" 가 남지 않게 합니다.
+- **SQLite 영속성**: ECS 컨테이너 로컬이라 재배포 시 사라집니다(prompt·agent 는 재동기화되지만 MCP·Skill 등록 정보와 편집한 설명은 유실). 영구 저장소(EFS 등)는 미정.
+- **Gateway 키 공유**: 현재 agentic-work 의 키를 복사해 사용 중이라 사용량이 그쪽에 합산됩니다. 별도 키 발급 권장. 로그인한 모든 사용자가 같은 키로 호출합니다(사용자별 제한 없음).
+- **Gateway 모델**: 목록에 보여도 키·구독 상태에 따라 호출이 실패할 수 있습니다(예: Marketplace 구독 필요, 일부 모델 400/502).
+- `application/config.json`(계정 ID·Registry ARN·CloudFront ID 등 계정 고유 값)은 `installer.py` 가 만드는 파일이며 **저장소에 올리지 않습니다**(`.gitignore`). 새로 clone 했다면 `python installer.py`(또는 `--registry-only`)로 다시 만들거나 `REGISTRY_ID`·`HARNESS_ARN` 환경 변수를 지정하세요.
+
+- **Skill 테스트의 실행 환경**: harness 기본 이미지(Amazon Linux 2023)에는 `node`/`npm` 이 없어서, Skill 테스트는 harness 호출 전에 세션마다 한 번 `InvokeAgentRuntimeCommand` 로 설치합니다(`mcp_test.ensure_node_installed`, harness-work 의 `220e457` 방식). 이 이미지는 `apt-get` 이 아니라 microdnf 라서 `dnf install -y nodejs npm`(Node 18, `-q` 불가)을 먼저 쓰고 `apt-get` 은 폴백입니다. 명령은 runtime ARN 이 아니라 **harness ARN** 으로 호출해야 합니다(runtime ARN 은 `managed by a harness` 로 거부). 설치는 best effort 라 실패해도 대화는 계속되고, 첫 호출은 설치로 20초가량 더 걸립니다. MCP 테스트에는 설치하지 않습니다. `docx` 같은 npm 패키지는 세션 안에서 agent 가 직접 설치합니다(세션이 바뀌면 다시). `soffice`·`pandoc` 은 없어 PDF 변환 검증은 불가. repo 전체처럼 SKILL.md 가 여러 개인 주소는 거부되므로 skill 하나를 가리키는 경로가 필요합니다.
+- **Agent 테스트의 입력 규약**: runtime 마다 payload 규약이 달라, agentic-work 방식(`prompt` 중심)을 따르는 runtime 만 확실히 동작합니다(`agentic_work`, `toons_viewer` 확인). 다른 규약은 응답이 비거나 오류가 날 수 있습니다. 호출은 서버의 IAM 권한으로 이뤄지므로 ECS task role 에 `InvokeHarness`/`InvokeAgentRuntime` 이 필요합니다(`installer.py` 에 포함).
+- **MCP 테스트의 권한 범위**: harness 실행 역할이 이 계정의 모든 Gateway(`gateway/*`)를 호출할 수 있어, 로그인한 누구나 포털에서 IAM Gateway 의 도구를 실행해 볼 수 있습니다. 직접 등록한 MCP 의 헤더(인증 정보)는 harness 호출에 그대로 전달됩니다. 필요하면 허용 Gateway 를 지정해 범위를 좁히세요. harness 는 Bedrock 모델을 직접 쓰므로 AWSome AI Gateway 를 거치지 않습니다.
+- **도구가 없는 Gateway**: `harness-work`·`harness-skills`·`agentcore-harness` 는 target 이 0개라 테스트해도 호출할 도구가 없습니다.
+
+## 로드맵 (미구현)
+- MCP 서버 **사용 승인** 흐름
+- Gateway target(도구) 목록
+- Registry **hybrid 검색**(`SearchRegistryRecords`) 과 Registry 기준 목록
+- 이벤트·감사 로그 패널
+- SQLite 영구 저장소(현재 컨테이너 로컬이라 재배포 시 유실 — 등록 항목은 Registry 에서 복원되지만 MCP 헤더·소유자·편집한 설명은 복원 안 됨)
