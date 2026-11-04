@@ -178,3 +178,7 @@ td .hint{margin:.1rem 0 0}
 .switch{display:flex;gap:.7rem;align-items:flex-start;padding:.7rem .8rem;border:1px solid var(--line);border-radius:10px;background:var(--paper);cursor:pointer}
 .switch input{width:auto;margin-top:.25rem;accent-color:var(--teal)}
 .switch .hint{display:block;margin-top:.15rem}
+
+/* MCP 사용 신청 */
+.usage{border:1px solid var(--line);border-radius:10px;padding:.2rem .9rem .9rem;background:var(--paper)}
+.usage h3{margin-top:.7rem}

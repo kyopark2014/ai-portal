@@ -188,3 +188,20 @@ export const registryInfo = () => callErr<RegistryInfo>("/api/registry");
 export interface Policy { auto_approval: boolean; auto_review: boolean; changed_by?: string; changed_at?: number }
 export const getPolicy = () => callErr<Policy>("/api/policy");
 export const setPolicy = (body: Partial<Pick<Policy, "auto_approval" | "auto_review">>) => callErr<Policy>("/api/policy", json("PUT", body));
+
+// ── MCP 사용 신청 ──
+export interface UsageState {
+  applicable: boolean; registered?: boolean; can_use?: boolean; can_request?: boolean;
+  status?: "OWNER" | "NONE" | "PENDING" | "APPROVED" | "REJECTED"; reason?: string;
+}
+export interface UsageRequest {
+  item_id: number; email: string; status: "PENDING" | "APPROVED" | "REJECTED"; requested_at: number;
+  decided_at: number | null; decided_by: string; reason: string;
+  mcp: { id: number; name: string; owner: string; description: string };
+}
+export const myUsage = (id: number) => callErr<UsageState>(`/api/mcp/${id}/usage`);
+export const requestUsage = (id: number) => callErr<UsageState>(`/api/mcp/${id}/usage`, json("POST"));
+export const listUsageRequests = (status: "PENDING" | "APPROVED" | "REJECTED" = "PENDING") =>
+  callErr<{ requests: UsageRequest[] }>(`/api/usage-requests?status=${status}`);
+export const decideUsage = (itemId: number, email: string, decision: "APPROVED" | "REJECTED", reason = "") =>
+  callErr<unknown>(`/api/usage-requests/${itemId}/${encodeURIComponent(email)}/decision`, json("POST", { decision, reason }));

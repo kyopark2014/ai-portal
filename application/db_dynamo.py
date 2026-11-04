@@ -259,3 +259,51 @@ def login_totals() -> dict:
 def recent_logins(limit: int = 30) -> list[dict]:
     rows = sorted(_logins(), key=lambda x: x["logged_at"], reverse=True)[: min(max(limit, 1), 200)]
     return [{"email": r["email"], "name": r.get("name", ""), "logged_at": r["logged_at"]} for r in rows]
+
+
+# ── 사용 신청: pk=USAGE#<item_id>, sk=<email> ──
+def _ur(r: dict) -> dict:
+    g = lambda k, d="": _plain(r.get(k, d))
+    return {"item_id": int(g("item_id", 0)), "email": r["email"], "status": r["status"], "requested_at": g("requested_at", 0.0),
+            "decided_at": g("decided_at", 0.0) or None, "decided_by": r.get("decided_by", "") or "", "reason": r.get("reason", "") or ""}
+
+
+def get_usage_request(item_id: int, email: str) -> Optional[dict]:
+    r = table().get_item(Key={"pk": f"USAGE#{int(item_id)}", "sk": email.lower()}).get("Item")
+    return _ur(r) if r else None
+
+
+def put_usage_request(item_id: int, email: str, status: str, decided_by: str = "", reason: str = "") -> dict:
+    now, email = time.time(), email.lower()
+    key = {"pk": f"USAGE#{int(item_id)}", "sk": email}
+    if status == "PENDING":
+        table().put_item(Item=_num({**key, "item_id": int(item_id), "email": email, "status": "PENDING", "requested_at": now,
+                                    "decided_at": 0, "decided_by": "", "reason": ""}))
+    else:
+        try:   # 신청이 없던 사용자에게 결과만 남기지 않는다
+            table().update_item(Key=key, UpdateExpression="SET #s=:s, decided_at=:t, decided_by=:b, reason=:r",
+                                ConditionExpression=Attr("pk").exists(), ExpressionAttributeNames={"#s": "status"},
+                                ExpressionAttributeValues=_num({":s": status, ":t": now, ":b": decided_by, ":r": reason[:255]}))
+        except ClientError as e:
+            if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise
+    return get_usage_request(item_id, email) or {}
+
+
+def list_usage_requests(status: Optional[str] = None, item_id: Optional[int] = None) -> list[dict]:
+    out, start = [], None
+    while True:
+        r = table().scan(FilterExpression=Attr("pk").begins_with("USAGE#"), **({"ExclusiveStartKey": start} if start else {}))
+        out += r["Items"]
+        start = r.get("LastEvaluatedKey")
+        if not start:
+            break
+    rows = [_ur(x) for x in out]
+    if status: rows = [x for x in rows if x["status"] == status]
+    if item_id is not None: rows = [x for x in rows if x["item_id"] == int(item_id)]
+    return sorted(rows, key=lambda x: x["requested_at"], reverse=True)
+
+
+def delete_usage_requests(item_id: int) -> None:
+    for it in _query_all(f"USAGE#{int(item_id)}"):
+        table().delete_item(Key={"pk": it["pk"], "sk": it["sk"]})

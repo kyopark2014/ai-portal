@@ -96,6 +96,7 @@ def test_stream_relays_text_and_tool_events_and_scopes_session(env, monkeypatch)
     assert evs[-1]["done"] and evs[-1]["usage"] == {"input_tokens": 5, "output_tokens": 7}
     # 다른 사용자는 같은 session_id 를 써도 다른 harness 세션이 된다
     first = seen["runtimeSessionId"]
+    db.put_usage_request(iid, "b@x.com", "PENDING"); db.put_usage_request(iid, "b@x.com", "APPROVED", decided_by="admin")   # 다른 사용자는 사용 승인을 받은 뒤에야 호출할 수 있다
     client("b@x.com").post(f"/api/mcp/{iid}/chat", json={"session_id": "s" * 36, "messages": [{"role": "user", "content": "go"}]})
     assert seen["runtimeSessionId"] != first and "@" not in seen["actorId"]
 

@@ -131,3 +131,20 @@ def test_concurrent_inserts_never_share_an_id(store):
     with ThreadPoolExecutor(8) as ex:
         ids = list(ex.map(lambda n: db.insert_item("prompt", f"p{n}", "", "a@x.com", {}), range(40)))
     assert len(set(ids)) == 40 and len(db.list_items("prompt")) == 40
+
+
+def test_usage_requests_behave_identically(store):
+    assert db.get_usage_request(1, "a@x.com") is None
+    r = db.put_usage_request(1, "A@x.com", "PENDING")                                                     # 이메일은 소문자로 정규화
+    assert (r["item_id"], r["email"], r["status"], r["decided_by"]) == (1, "a@x.com", "PENDING", "") and r["requested_at"] > 0
+    assert db.put_usage_request(1, "a@x.com", "PENDING")["status"] == "PENDING" and len(db.list_usage_requests()) == 1   # 같은 (항목,사용자)는 한 건
+    ok = db.put_usage_request(1, "a@x.com", "APPROVED", decided_by="adm", reason="ok")
+    assert (ok["status"], ok["decided_by"], ok["reason"]) == ("APPROVED", "adm", "ok") and ok["decided_at"]
+    assert db.put_usage_request(1, "ghost@x.com", "APPROVED", decided_by="adm") == {}                    # 신청 없는 사용자에게 결과만 남기지 않는다
+    db.put_usage_request(1, "a@x.com", "PENDING")                                                          # 다시 신청하면 처리 정보가 초기화된다
+    again = db.get_usage_request(1, "a@x.com"); assert again["status"] == "PENDING" and again["decided_by"] == "" and again["reason"] == ""
+    db.put_usage_request(2, "b@x.com", "PENDING"); db.put_usage_request(2, "c@x.com", "PENDING"); db.put_usage_request(2, "c@x.com", "REJECTED", decided_by="adm", reason="no")
+    assert {(x["item_id"], x["email"]) for x in db.list_usage_requests(status="PENDING")} == {(1, "a@x.com"), (2, "b@x.com")}
+    assert [x["email"] for x in db.list_usage_requests(item_id=2, status="REJECTED")] == ["c@x.com"]
+    db.delete_usage_requests(2)
+    assert db.list_usage_requests(item_id=2) == [] and len(db.list_usage_requests()) == 1

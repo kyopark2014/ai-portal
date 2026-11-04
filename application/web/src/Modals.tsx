@@ -3,6 +3,7 @@ import * as api from "./api";
 import type { Item, Kind, RegistryInfo, User } from "./api";
 import ConfirmDialog, { type ConfirmSpec } from "./ConfirmDialog";
 import McpTest from "./McpTest";
+import { statusText } from "./Explore";
 import PromptTest from "./PromptTest";
 import ReviewerPicker from "./ReviewerPicker";
 
@@ -134,6 +135,7 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
   const [reg, setReg] = useState<RegistryInfo | null>(null);
   const [ask, setAsk] = useState<ConfirmSpec | null>(null);
   const [pickReviewer, setPickReviewer] = useState(false);
+  const [usage, setUsage] = useState<api.UsageState | null>(null);
   const d = item.data;
 
   useEffect(() => { api.registryInfo().then(setReg).catch(() => setReg({ registry_id: "", name: "", status: "", authorizer: "", auto_approval: null })); }, []);
@@ -144,6 +146,8 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
     setBusy(false);
   }
   const upd = (i: Item) => { onChanged(i); setDesc(i.description); };
+  const loadUsage = () => { if (item.kind === "mcp") api.myUsage(item.id).then(setUsage).catch(() => setUsage(null)); };
+  useEffect(loadUsage, [item.id, item.registry_status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 등록 직후 record 는 CREATING 이고 1~2초 뒤 DRAFT 가 된다. 포털 상태가 낡은 채 굳지 않도록
   // 화면이 열려 있는 동안 실제 상태를 확인해 반영한다(그래야 "승인 요청" 버튼이 나타난다).
@@ -180,6 +184,21 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
           <PromptTest key={item.id + ":" + d.version + ":" + d.text.length} item={item} />
         </>)}
 
+        {item.kind === "mcp" && usage?.applicable && (
+          <div className="usage" role="region" aria-label="사용 신청">
+            <h3>사용 신청</h3>
+            {usage.status === "OWNER" ? <p className="hint">소유자·관리자는 신청 없이 사용할 수 있습니다.</p>
+              : usage.status === "APPROVED" ? <p className="note ok">사용이 승인되었습니다. 아래에서 테스트할 수 있습니다.</p>
+              : usage.status === "PENDING" ? <p className="note" role="status">사용 신청 중입니다. reviewer 가 승인하면 사용할 수 있습니다.</p>
+              : (<>
+                  {usage.status === "REJECTED" && <p className="note error" role="status">사용 신청이 거절되었습니다{usage.reason ? `: ${usage.reason}` : ""}. 다시 신청할 수 있습니다.</p>}
+                  {!usage.registered && <p className="hint">등록이 완료된 후에 사용 신청할 수 있습니다.</p>}
+                  <div className="actions left"><button type="button" className="btn" disabled={busy || !usage.can_request}
+                    title={usage.can_request ? "" : "등록이 완료된 MCP 에만 신청할 수 있습니다"}
+                    onClick={() => run(() => api.requestUsage(item.id), (u) => { setUsage(u); setMsg(u.status === "APPROVED" ? "사용 신청이 바로 승인되었습니다." : "사용 신청을 보냈습니다. reviewer 가 승인하면 사용할 수 있습니다."); })}>사용 신청</button></div>
+                </>)}
+          </div>)}
+
         {item.kind === "mcp" && d.kind === "gateway" && (<>
           <h3>AgentCore Gateway</h3>
           <dl className="kv">
@@ -190,11 +209,14 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
             <div><dt>리전</dt><dd>{d.region}</dd></div>
             <div className="wide-row"><dt>MCP endpoint</dt><dd className="mono sm arn">{d.endpoint || "-"}</dd></div>
           </dl>
-          <h3>테스트 <span className="hint">harness agent</span></h3>
-          <McpTest key={item.id} item={item} />
+          {(usage?.can_use ?? true) && (<>
+            <h3>테스트 <span className="hint">harness agent</span></h3>
+            <McpTest key={item.id} item={item} /></>)}
         </>)}
 
-        {item.kind === "mcp" && d.kind !== "gateway" && (<>
+        {item.kind === "mcp" && usage && !usage.can_use && <p className="hint">사용 신청이 승인되면 이 MCP 를 테스트할 수 있습니다.</p>}
+
+        {item.kind === "mcp" && d.kind !== "gateway" && (usage?.can_use ?? true) && (<>
           <h3>Endpoint</h3><p className="mono">{d.endpoint}</p>
           {d.headers?.length > 0 && <p className="hint">헤더: {d.headers.map((h: any) => h.key).join(", ")} (값은 숨김)</p>}
           <div className="actions left"><button className="btn ghost" disabled={busy} onClick={() => run(() => api.testMcp(item.id), (r) => setOut(`initialize: HTTP ${r.status}\ntools/list: HTTP ${r.tools_status}\n\n${r.body}`))}>연결 테스트 (tools/list)</button></div>
@@ -221,7 +243,7 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
 
         <h3>Agent Registry</h3>
         {item.registry_record_id ? (<div>
-          <p>Record <span className="mono sm">{item.registry_record_id}</span> <span className={`badge st-${item.registry_status}`}>{item.registry_status}</span>
+          <p>Record <span className="mono sm">{item.registry_record_id}</span> <span className={`badge st-${item.registry_status}`}>{statusText(item.registry_status)}</span>
             {transient && <span className="hint"> 등록 처리 중… 완료되면 승인 요청 버튼이 나타납니다.</span>}</p>
           <div className="actions left">
             <button className="btn ghost" disabled={busy} onClick={() => run(() => api.refreshRegistry(item.kind, item.id), (i) => { upd(i); setMsg(i.registry_reason ? `상태 사유: ${i.registry_reason}` : "상태를 갱신했습니다."); })}>상태 확인</button>

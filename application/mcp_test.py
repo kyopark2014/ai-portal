@@ -218,6 +218,8 @@ def _prepare(item_id: int, kind: str, body: McpChatIn, user: auth.User) -> tuple
     if sum(len(m.content) for m in body.messages) > MAX_CHARS:
         raise HTTPException(422, "대화가 너무 깁니다. 새 대화를 시작하세요")
     it = catalog.visible_item(item_id, user, kind)
+    from . import usage
+    usage.require_use(it, user)                                        # MCP 는 사용 신청이 승인된 사람만 harness 로 호출해 볼 수 있다
     arn = harness_arn()
     if not arn:
         raise HTTPException(503, "테스트용 harness 가 없습니다. `python installer.py --harness-only` 를 실행하세요")

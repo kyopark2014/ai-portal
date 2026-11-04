@@ -7,7 +7,7 @@ import ConfirmDialog, { type ConfirmSpec } from "./ConfirmDialog";
 const KIND_LABEL: Record<string, string> = { prompt: "Prompt", mcp: "MCP", skill: "Skill", agent: "Agent" };
 const KINDS: Kind[] = ["prompt", "mcp", "skill", "agent"];
 const STATUS_LABEL: Record<string, string> = {
-  APPROVED: "승인됨", PENDING_APPROVAL: "승인 대기", DRAFT: "초안", REJECTED: "거절됨", DEPRECATED: "Deprecated",
+  APPROVED: "등록", PENDING_APPROVAL: "승인 대기", DRAFT: "초안", REJECTED: "거절됨", DEPRECATED: "Deprecated",
   CREATING: "등록 중", UPDATING: "갱신 중", NOT_REGISTERED: "미등록",
 };
 const STATUS_ORDER = ["APPROVED", "PENDING_APPROVAL", "DRAFT", "REJECTED", "DEPRECATED", "CREATING", "UPDATING", "NOT_REGISTERED"];

@@ -45,6 +45,17 @@ CREATE TABLE IF NOT EXISTS login_events (
 );
 CREATE INDEX IF NOT EXISTS ix_login_email ON login_events(email, logged_at DESC);
 CREATE INDEX IF NOT EXISTS ix_login_at ON login_events(logged_at DESC);
+CREATE TABLE IF NOT EXISTS usage_requests (
+  item_id INTEGER NOT NULL,
+  email TEXT NOT NULL,
+  status TEXT NOT NULL,                -- PENDING | APPROVED | REJECTED
+  requested_at REAL NOT NULL,
+  decided_at REAL,
+  decided_by TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (item_id, email)
+);
+CREATE INDEX IF NOT EXISTS ix_usage_status ON usage_requests(status, requested_at DESC);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
@@ -232,3 +243,43 @@ def recent_logins(limit: int = 30) -> list[dict]:
     with conn() as c:
         return [dict(r) for r in c.execute(
             "SELECT email, name, logged_at FROM login_events ORDER BY logged_at DESC LIMIT ?", (min(max(limit, 1), 200),))]
+
+
+# ── 사용 신청 (MCP 를 쓰겠다는 신청. Registry 의 '등록 승인' 과는 별개로 포털이 관리한다) ──
+def _ur(r: sqlite3.Row) -> dict:
+    return {"item_id": int(r["item_id"]), "email": r["email"], "status": r["status"], "requested_at": r["requested_at"],
+            "decided_at": r["decided_at"], "decided_by": r["decided_by"] or "", "reason": r["reason"] or ""}
+
+
+def get_usage_request(item_id: int, email: str) -> Optional[dict]:
+    with conn() as c:
+        r = c.execute("SELECT * FROM usage_requests WHERE item_id=? AND email=?", (item_id, email.lower())).fetchone()
+    return _ur(r) if r else None
+
+
+def put_usage_request(item_id: int, email: str, status: str, decided_by: str = "", reason: str = "") -> dict:
+    """신청을 만들거나(PENDING) 처리 결과를 기록한다. 같은 (항목, 사용자)는 한 건만 있고 다시 신청하면 덮어쓴다."""
+    now, email = time.time(), email.lower()
+    with conn() as c:
+        if status == "PENDING":
+            c.execute("INSERT INTO usage_requests(item_id,email,status,requested_at,decided_at,decided_by,reason) VALUES(?,?,?,?,NULL,'','') "
+                      "ON CONFLICT(item_id,email) DO UPDATE SET status='PENDING', requested_at=excluded.requested_at, decided_at=NULL, decided_by='', reason=''",
+                      (item_id, email, status, now))
+        else:
+            c.execute("UPDATE usage_requests SET status=?, decided_at=?, decided_by=?, reason=? WHERE item_id=? AND email=?",
+                      (status, now, decided_by, reason[:255], item_id, email))
+    return get_usage_request(item_id, email) or {}
+
+
+def list_usage_requests(status: Optional[str] = None, item_id: Optional[int] = None) -> list[dict]:
+    sql, args = "SELECT * FROM usage_requests WHERE 1=1", []
+    if status: sql += " AND status=?"; args.append(status)
+    if item_id is not None: sql += " AND item_id=?"; args.append(item_id)
+    with conn() as c:
+        rows = c.execute(sql + " ORDER BY requested_at DESC", args).fetchall()
+    return [_ur(r) for r in rows]
+
+
+def delete_usage_requests(item_id: int) -> None:
+    with conn() as c:
+        c.execute("DELETE FROM usage_requests WHERE item_id=?", (item_id,))

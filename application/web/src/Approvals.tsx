@@ -2,17 +2,18 @@ import { useCallback, useEffect, useState } from "react";
 import * as api from "./api";
 import type { RecStatus, RegDetail, RegRecord } from "./api";
 import AdminManager from "./AdminManager";
+import UsageRequests from "./UsageRequests";
 
-const TABS: { s: RecStatus | "ADMINS"; label: string }[] = [
+const TABS: { s: RecStatus | "ADMINS" | "USAGE"; label: string }[] = [
   { s: "PENDING_APPROVAL", label: "승인 대기" }, { s: "APPROVED", label: "승인됨" },
-  { s: "REJECTED", label: "거절됨" }, { s: "DEPRECATED", label: "Deprecated" }, { s: "ADMINS", label: "승인자 관리" },
+  { s: "REJECTED", label: "거절됨" }, { s: "DEPRECATED", label: "Deprecated" }, { s: "USAGE", label: "사용 신청" }, { s: "ADMINS", label: "승인자 관리" },
 ];
 const TYPE: Record<string, string> = { MCP: "MCP", A2A: "Agent", AGENT_SKILLS: "Skill", CUSTOM: "Prompt/Custom" };
 
 function when(iso: string | null) { return iso ? new Date(iso).toLocaleString("ko-KR", { hour12: false }) : "-"; }
 
 export default function Approvals({ openId, onOpened, isAdmin = false }: { openId: string | null; onOpened: () => void; isAdmin?: boolean }) {
-  const [tab, setTab] = useState<RecStatus | "ADMINS">("PENDING_APPROVAL");
+  const [tab, setTab] = useState<RecStatus | "ADMINS" | "USAGE">("PENDING_APPROVAL");
   const [rows, setRows] = useState<RegRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -20,7 +21,7 @@ export default function Approvals({ openId, onOpened, isAdmin = false }: { openI
 
   const load = useCallback(async () => {
     setLoading(true); setErr("");
-    if (tab === "ADMINS") { setLoading(false); return; }
+    if (tab === "ADMINS" || tab === "USAGE") { setLoading(false); return; }
     try { setRows((await api.listApprovals(tab)).records); } catch (e: any) { setErr(e.message); }
     setLoading(false);
   }, [tab]);
@@ -36,7 +37,7 @@ export default function Approvals({ openId, onOpened, isAdmin = false }: { openI
         {TABS.filter((t) => isAdmin || t.s !== "ADMINS").map((t) => <button key={t.s} role="tab" aria-selected={tab === t.s} className={`tab ${tab === t.s ? "on" : ""}`} onClick={() => setTab(t.s)}>{t.label}</button>)}
       </div>
       {err && <p className="note error" role="alert">{err}</p>}
-      {tab === "ADMINS" ? <AdminManager /> : loading ? <p className="sub">불러오는 중…</p> : rows.length === 0 ? (
+      {tab === "ADMINS" ? <AdminManager /> : tab === "USAGE" ? <UsageRequests /> : loading ? <p className="sub">불러오는 중…</p> : rows.length === 0 ? (
         <div className="empty-box"><p>{tab === "PENDING_APPROVAL" ? "승인 대기 중인 요청이 없습니다." : "해당하는 record가 없습니다."}</p></div>
       ) : (
         <div className="rows">

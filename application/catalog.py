@@ -208,6 +208,7 @@ def delete_item(kind: Kind, item_id: int, user: auth.User = Depends(auth.current
                 if "registry_record" in done:
                     db.update_item(item_id, registry_record_id=None, registry_status=None)
                 raise aws_err(e)
+    db.delete_usage_requests(item_id)
     db.delete_item(item_id)
     return {"ok": True, "deleted": done}
 
@@ -276,6 +277,8 @@ def test_mcp(item_id: int, user: auth.User = Depends(auth.current_user)):
     """MCP initialize + tools/list 를 호출해 연결을 확인한다."""
     import httpx
     it = visible_item(item_id, user, "mcp")
+    from . import usage
+    usage.require_use(it, user)                                        # 사용 신청이 승인된 사람만 실제로 연결해 볼 수 있다
     d = it["data"]
     if d.get("kind") == "gateway" and d.get("authorizer") != "NONE":
         raise HTTPException(422, f"AgentCore Gateway({d.get('authorizer')} 인증)는 포털에서 직접 호출할 수 없습니다. "

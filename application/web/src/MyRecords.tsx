@@ -6,7 +6,7 @@ import { ago } from "./Explore";
 const KIND: Record<Kind, string> = { prompt: "Prompt", mcp: "MCP", skill: "Skill", agent: "Agent" };
 const ORDER = ["APPROVED", "PENDING_APPROVAL", "DRAFT", "REJECTED", "DEPRECATED", "NOT_REGISTERED"] as const;
 const LABEL: Record<string, string> = {
-  APPROVED: "승인됨", PENDING_APPROVAL: "승인 대기", DRAFT: "초안", REJECTED: "거절됨", DEPRECATED: "Deprecated",
+  APPROVED: "등록", PENDING_APPROVAL: "승인 대기", DRAFT: "초안", REJECTED: "거절됨", DEPRECATED: "Deprecated",
   NOT_REGISTERED: "Registry 미등록", CREATING: "등록 중", UPDATING: "갱신 중",
 };
 

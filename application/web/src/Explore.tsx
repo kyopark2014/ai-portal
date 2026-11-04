@@ -12,6 +12,11 @@ export const KINDS: { kind: Kind; label: string; icon: string; blurb: string }[]
   { kind: "agent", label: "Agent", icon: "◈", blurb: "AgentCore harness · runtime" },
 ];
 
+/** 카드 배지: Registry 상태를 사람이 읽는 말로. APPROVED 는 '등록'(등록 승인 완료)이다. */
+export function statusText(st: string | null): string {
+  return ({ APPROVED: "등록", PENDING_APPROVAL: "승인 대기", DRAFT: "초안", REJECTED: "거절됨", DEPRECATED: "Deprecated", CREATING: "등록 중", UPDATING: "갱신 중" } as Record<string, string>)[st ?? ""] ?? (st ?? "");
+}
+
 export function ago(ts: number): string {
   const s = Math.max(0, Date.now() / 1000 - ts);
   if (s < 60) return "방금 전";
@@ -188,7 +193,7 @@ export default function Explore({ user }: { user: User }) {
               </div>
               <footer>
                 <span>Modified {ago(it.updated_at)}</span>
-                {it.registry_status && <span className={`badge st-${it.registry_status}`}>{it.registry_status}</span>}
+                {it.registry_status && <span className={`badge st-${it.registry_status}`}>{statusText(it.registry_status)}</span>}
                 {view === "list" && (
                   <div className="acts">
                     <button type="button" className="link" onClick={() => setOpen(it)}>Open</button>
