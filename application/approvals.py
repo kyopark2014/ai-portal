@@ -27,6 +27,18 @@ def require_admin(user: auth.User = Depends(auth.current_user)) -> auth.User:
     return user
 
 
+def require_reviewer(user: auth.User = Depends(auth.current_user)) -> auth.User:
+    """승인 화면에 들어올 수 있는 사람: 관리자 + 한 record 라도 reviewer 로 지정된 사람. 처리 가능 범위는 record 마다 따로 판단한다."""
+    if user.role != "admin" and not admins.reviewing(user.email):
+        raise HTTPException(403, "승인 권한이 없습니다")
+    return user
+
+
+def _visible_to(user: auth.User, record_id: str) -> bool:
+    """관리자는 전부, reviewer 는 자기에게 지정된 record 만 본다."""
+    return user.role == "admin" or admins.is_reviewer(record_id, user.email)
+
+
 def _registry_id() -> str:
     rid = catalog.selected_registry()
     if not rid:
@@ -58,7 +70,7 @@ def _summary(r: dict) -> dict:
 
 @router.get("")
 def queue(status: Literal["PENDING_APPROVAL", "APPROVED", "REJECTED", "DEPRECATED", "DRAFT"] = "PENDING_APPROVAL",
-          user: auth.User = Depends(require_admin)):
+          user: auth.User = Depends(require_reviewer)):
     rid, out, token = _registry_id(), [], None
     try:
         while True:
@@ -70,15 +82,18 @@ def queue(status: Literal["PENDING_APPROVAL", "APPROVED", "REJECTED", "DEPRECATE
                 break
     except (ClientError, BotoCoreError) as e:
         raise catalog.aws_err(e)
+    out = [x for x in out if _visible_to(user, x["recordId"])]
     out.sort(key=lambda x: x.get("updatedAt") or 0, reverse=True)
-    asg = admins.assignments()
-    return {"records": [{**_summary(x), "portal": _portal_item(x["recordId"]), "approver": asg.get(x["recordId"]),
+    rv = admins.reviewers_map()
+    return {"records": [{**_summary(x), "portal": _portal_item(x["recordId"]), "reviewers": rv.get(x["recordId"], []),
                          "can_decide": admins.can_decide(x["recordId"], user.email)} for x in out], "registryId": rid}
 
 
 @router.get("/{record_id}")
-def detail(record_id: str, user: auth.User = Depends(require_admin)):
+def detail(record_id: str, user: auth.User = Depends(require_reviewer)):
     rid = _registry_id()
+    if not _visible_to(user, _record_id(record_id)):
+        raise HTTPException(404, "not found")          # reviewer 가 아닌 record 는 존재 여부도 알리지 않는다
     try:
         r = aws.registry_client().get_registry_record(registryId=rid, recordId=_record_id(record_id))
     except (ClientError, BotoCoreError) as e:
@@ -99,7 +114,7 @@ def detail(record_id: str, user: auth.User = Depends(require_admin)):
             content = inline
     return {**_summary(r), "statusReason": r.get("statusReason", ""), "content": content,
             "portal": _portal_item(record_id), "registryId": rid,
-            "approver": admins.assignments().get(record_id), "can_decide": admins.can_decide(record_id, user.email)}
+            "reviewers": admins.reviewers_of(record_id), "can_decide": admins.can_decide(record_id, user.email)}
 
 
 class DecisionIn(BaseModel):
@@ -108,11 +123,14 @@ class DecisionIn(BaseModel):
 
 
 @router.post("/{record_id}/decision")
-def decide(record_id: str, body: DecisionIn, user: auth.User = Depends(require_admin)):
+def decide(record_id: str, body: DecisionIn, user: auth.User = Depends(require_reviewer)):
     rid, rec = _registry_id(), _record_id(record_id)
+    if not _visible_to(user, rec):
+        raise HTTPException(404, "not found")
     if not admins.can_decide(rec, user.email):
-        who = admins.assignments().get(rec)
-        raise HTTPException(403, f"이 요청은 지정된 승인자({who})만 처리할 수 있습니다")
+        raise HTTPException(403, "이 record 를 처리할 권한이 없습니다")
+    if body.decision == "DEPRECATED" and user.role != "admin":
+        raise HTTPException(403, "Deprecate 는 관리자만 할 수 있습니다")
     if body.decision == "REJECTED" and not body.reason.strip():
         raise HTTPException(422, "거절 사유를 입력하세요")
     client = aws.registry_client()
@@ -131,7 +149,7 @@ def decide(record_id: str, body: DecisionIn, user: auth.User = Depends(require_a
     except (ClientError, BotoCoreError) as e:
         raise catalog.aws_err(e)
     try:
-        admins.clear_assignment(rec)
+        admins.clear_reviewers(rec)
     except Exception:  # noqa: BLE001 — 정리는 best effort
         pass
     item = _portal_item(rec)
@@ -213,3 +231,54 @@ def dashboard(user: auth.User = Depends(require_admin)):
     return {"totals": db.login_totals(), "users": users, "recent_logins": db.recent_logins(30),
             "registry": {"by_type": by_type, "total": sum(sum(v.values()) for v in by_type.values()), "error": registry_error},
             "admins": sorted(admin_set)}
+
+
+# ── record 별 reviewer 관리 (관리자 전용) ─────────────────────────────────────
+reviewers_router = APIRouter(prefix="/api/reviewers")
+
+
+class ReviewerIn(BaseModel):
+    record_id: str = Field(min_length=6, max_length=64)
+    email: str = Field(min_length=3, max_length=254)
+
+
+@reviewers_router.get("/users")
+def pick_users(q: str = "", limit: int = 20, user: auth.User = Depends(require_admin)):
+    """reviewer 로 고를 수 있는 사용자 검색. 로그인한 적 있는 사람과 항목을 가진 사람 중에서 이메일·이름으로 찾는다."""
+    q = q.strip().lower()
+    out = []
+    for u in db.user_stats():
+        if u["email"] in ("aws", "registry") or "@" not in u["email"]:
+            continue                                   # 소유자 표시용 가짜 계정은 제외
+        if q and q not in u["email"] and q not in (u.get("name") or "").lower():
+            continue
+        out.append({"email": u["email"], "name": u.get("name") or "", "is_admin": u["email"] in admins.all_admins(),
+                    "last_login": u.get("last_login")})
+    return {"users": out[: min(max(limit, 1), 50)], "total": len(out)}
+
+
+@reviewers_router.get("/{record_id}")
+def get_reviewers(record_id: str, user: auth.User = Depends(require_admin)):
+    return {"record_id": _record_id(record_id), "reviewers": admins.reviewers_of(record_id)}
+
+
+@reviewers_router.post("")
+def add_reviewer(body: ReviewerIn, user: auth.User = Depends(require_admin)):
+    rec = _record_id(body.record_id)
+    try:
+        return {"record_id": rec, "reviewers": admins.add_reviewer(rec, body.email)}
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except (ClientError, BotoCoreError) as e:
+        raise catalog.aws_err(e)
+
+
+@reviewers_router.delete("")
+def remove_reviewer(record_id: str, email: str, user: auth.User = Depends(require_admin)):
+    rec = _record_id(record_id)
+    try:
+        return {"record_id": rec, "reviewers": admins.remove_reviewer(rec, email)}
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except (ClientError, BotoCoreError) as e:
+        raise catalog.aws_err(e)

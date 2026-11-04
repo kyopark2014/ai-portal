@@ -702,43 +702,26 @@ def refresh_registry(kind: Kind, item_id: int, user: auth.User = Depends(auth.cu
 
 
 def _forget_assignment(record_id: str) -> None:
-    """record 가 사라지면 그 record 의 지정 승인자도 지운다(best effort — 남아도 해가 없지만 목록이 쌓이지 않게)."""
+    """record 가 사라지면 그 record 의 reviewer 정보도 지운다(best effort — 남아도 해가 없지만 목록이 쌓이지 않게)."""
     try:
-        admins.clear_assignment(record_id)
+        admins.clear_reviewers(record_id)
     except Exception:  # noqa: BLE001
-        log.warning("could not clear approver assignment for %s", record_id)
-
-
-class SubmitIn(BaseModel):
-    approver: str = ""            # 선택: 승인을 맡길 관리자 이메일. 비우면 모든 관리자가 처리할 수 있다
-
-
-@router.get("/approvers")
-def approvers(user: auth.User = Depends(auth.current_user)):
-    """승인 요청 때 고를 수 있는 사람(= 관리자) 목록."""
-    return {"approvers": [{"email": a["email"]} for a in admins.listing()]}
+        log.warning("could not clear reviewers for %s", record_id)
 
 
 @router.post("/catalog/{kind}/{item_id}/registry/submit")
-def submit_registry(kind: Kind, item_id: int, body: SubmitIn | None = None, user: auth.User = Depends(auth.current_user)):
+def submit_registry(kind: Kind, item_id: int, user: auth.User = Depends(auth.current_user)):
+    """승인 요청. 승인은 관리자가 하고, 관리자가 이 record 에 추가해 둔 reviewer 도 할 수 있다(요청자는 승인자를 고르지 않는다)."""
     it = _own(item_id, kind, user)
     if not it["registry_record_id"]:
         raise HTTPException(409, "먼저 Registry 에 등록하세요")
-    approver = (body.approver if body else "").strip().lower()
-    if approver and approver not in admins.all_admins():
-        raise HTTPException(422, "선택한 사람은 승인 가능한 관리자가 아닙니다")
     try:
         r = aws.registry_client().submit_registry_record_for_approval(
             registryId=it["registry_id"], recordId=it["registry_record_id"])
     except (ClientError, BotoCoreError) as e:
         raise aws_err(e)
-    if approver:
-        try:
-            admins.assign(it["registry_record_id"], approver)
-        except Exception as e:  # noqa: BLE001 — 지정 저장이 실패해도 승인 요청 자체는 이미 접수됐다
-            log.warning("approver assignment not saved: %s", type(e).__name__)
     db.update_item(item_id, registry_status=r.get("status", "PENDING_APPROVAL"))
-    return {**_out(db.get_item(item_id), user), "approver": approver or None}
+    return _out(db.get_item(item_id), user)
 
 
 @router.post("/catalog/{kind}/{item_id}/registry/cancel")

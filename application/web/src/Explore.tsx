@@ -3,6 +3,7 @@ import * as api from "./api";
 import type { Item, Kind, User } from "./api";
 import ConfirmDialog, { type ConfirmSpec } from "./ConfirmDialog";
 import { CreateModal, DetailModal } from "./Modals";
+import ReviewerPicker from "./ReviewerPicker";
 
 export const KINDS: { kind: Kind; label: string; icon: string; blurb: string }[] = [
   { kind: "prompt", label: "Prompt", icon: "✎", blurb: "Amazon Bedrock Prompt Management" },
@@ -27,7 +28,7 @@ function subtitle(it: Item): string {
   return d.source_label || "";
 }
 
-function CardMenu({ name, canDelete, onOpen, onDelete }: { name: string; canDelete: boolean; onOpen: () => void; onDelete: () => void }) {
+function CardMenu({ name, canDelete, onOpen, onDelete, onReviewer }: { name: string; canDelete: boolean; onOpen: () => void; onDelete: () => void; onReviewer?: () => void }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const btn = useRef<HTMLButtonElement>(null);
@@ -54,6 +55,7 @@ function CardMenu({ name, canDelete, onOpen, onDelete }: { name: string; canDele
       {open && (
         <div className="menu-pop" role="menu">
           <button type="button" role="menuitem" onClick={pick(onOpen)}>Open</button>
+          {onReviewer && <button type="button" role="menuitem" onClick={pick(onReviewer)}>Add reviewer</button>}
           {canDelete && <button type="button" role="menuitem" className="del" onClick={pick(onDelete)}>Delete</button>}
         </div>
       )}
@@ -73,6 +75,8 @@ export default function Explore({ user }: { user: User }) {
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const [open, setOpen] = useState<Item | null>(null);
   const [ask, setAsk] = useState<ConfirmSpec | null>(null);
+  const [reviewerFor, setReviewerFor] = useState<Item | null>(null);
+  const isAdmin = user.role === "admin";
   const [sync, setSync] = useState<{ running: boolean; error: string } | null>(null);
 
   const load = useCallback(async () => {
@@ -174,7 +178,8 @@ export default function Explore({ user }: { user: User }) {
               <header>
                 <span className={`avatar-l k-${it.kind}`} aria-hidden>{it.name[0]?.toUpperCase()}</span>
                 <h3 title={it.name}>{it.name}</h3>
-                {view === "grid" && <CardMenu name={it.name} canDelete={it.can_edit} onOpen={() => setOpen(it)} onDelete={() => onDelete(it)} />}
+                {view === "grid" && <CardMenu name={it.name} canDelete={it.can_edit} onOpen={() => setOpen(it)} onDelete={() => onDelete(it)}
+                  onReviewer={isAdmin && it.registry_record_id ? () => setReviewerFor(it) : undefined} />}
               </header>
               <p className="by">By {it.owner.split("@")[0]}{it.source === "aws" && <span className="badge">AWS</span>}</p>
               <div className="preview">
@@ -187,6 +192,7 @@ export default function Explore({ user }: { user: User }) {
                 {view === "list" && (
                   <div className="acts">
                     <button type="button" className="link" onClick={() => setOpen(it)}>Open</button>
+                    {isAdmin && it.registry_record_id && <button type="button" className="link" onClick={() => setReviewerFor(it)}>Add reviewer</button>}
                     {it.can_edit && <button type="button" className="link del" onClick={() => onDelete(it)}>Delete</button>}
                   </div>
                 )}
@@ -197,6 +203,7 @@ export default function Explore({ user }: { user: User }) {
       )}
 
       {ask && <ConfirmDialog spec={ask} onClose={() => setAsk(null)} />}
+      {reviewerFor && <ReviewerPicker item={reviewerFor} onClose={() => setReviewerFor(null)} />}
       {creating && <CreateModal kind={kind} onClose={() => setCreating(false)} onDone={(r) => {
         setCreating(false); load();
         setNotice(r.registry_error

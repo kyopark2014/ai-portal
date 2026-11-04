@@ -98,66 +98,99 @@ def remove(email: str) -> None:
     _save(cur - {email})
 
 
+# ── record 별 reviewer ───────────────────────────────────────────────────
+# 관리자는 항상 모든 record 를 승인할 수 있다. 관리자가 record 마다 reviewer 를 추가하면 그 사람도 **그 record 만** 승인할 수 있다.
+# Registry 는 record 에 reviewer 를 붙일 자리가 없고 컨테이너 DB 는 재배포 때 초기화되므로 SSM 에 둔다.
+REVIEWERS_PARAM = os.environ.get("REVIEWERS_PARAM", "/ai-portal/reviewers")
+MAX_REVIEWERS_PER_RECORD = 20
+_acache: tuple[float, dict[str, list[str]]] | None = None
+
+
+def reviewers_map() -> dict[str, list[str]]:
+    """{recordId: [reviewer 이메일…]}. 읽을 수 없으면 빈 매핑 → reviewer 권한은 인정하지 않는다(fail closed: 관리자만 승인)."""
+    global _acache
+    with _lock:
+        if _acache and time.monotonic() - _acache[0] < _TTL:
+            return {k: list(v) for k, v in _acache[1].items()}
+    try:
+        raw = json.loads(_ssm().get_parameter(Name=REVIEWERS_PARAM)["Parameter"]["Value"])
+        m = {str(k): sorted({str(e).lower() for e in v if isinstance(e, str)}) for k, v in raw.items()} if isinstance(raw, dict) else {}
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ParameterNotFound":
+            log.warning("reviewers parameter unreadable (%s) — only admins can decide", e.response["Error"]["Code"])
+        m = {}
+    except (BotoCoreError, ValueError):
+        log.warning("reviewers parameter unreadable — only admins can decide")
+        m = {}
+    with _lock:
+        _acache = (time.monotonic(), m)
+    return {k: list(v) for k, v in m.items()}
+
+
+def reviewers_of(record_id: str) -> list[str]:
+    return reviewers_map().get(record_id, [])
+
+
+def _save_reviewers(m: dict[str, list[str]]) -> None:
+    global _acache
+    m = {k: v for k, v in m.items() if v}
+    _ssm().put_parameter(Name=REVIEWERS_PARAM, Type="String", Overwrite=True, Value=json.dumps(m, sort_keys=True),
+                         Description="ai-portal: record -> additional reviewers")
+    with _lock:
+        _acache = (time.monotonic(), m)
+
+
+def add_reviewer(record_id: str, email: str) -> list[str]:
+    email = email.strip().lower()
+    if not valid_email(email):
+        raise ValueError("이메일 형식이 올바르지 않습니다")
+    m = reviewers_map(); cur = set(m.get(record_id, []))
+    if email in all_admins():
+        raise ValueError("관리자는 이미 모든 record 를 승인할 수 있습니다")
+    if email in cur:
+        raise ValueError("이미 이 record 의 reviewer 입니다")
+    if len(cur) >= MAX_REVIEWERS_PER_RECORD:
+        raise ValueError(f"reviewer 는 record 당 {MAX_REVIEWERS_PER_RECORD}명까지 지정할 수 있습니다")
+    m[record_id] = sorted(cur | {email})
+    _save_reviewers(m)
+    return m[record_id]
+
+
+def remove_reviewer(record_id: str, email: str) -> list[str]:
+    email = email.strip().lower()
+    m = reviewers_map(); cur = set(m.get(record_id, []))
+    if email not in cur:
+        raise ValueError("이 record 의 reviewer 가 아닙니다")
+    m[record_id] = sorted(cur - {email})
+    _save_reviewers(m)
+    return m[record_id]
+
+
+def clear_reviewers(record_id: str) -> None:
+    """record 가 사라졌을 때 그 reviewer 정보를 정리한다."""
+    m = reviewers_map()
+    if m.pop(record_id, None) is None:
+        return
+    _save_reviewers(m)
+
+
+def is_reviewer(record_id: str, email: str) -> bool:
+    return email.lower() in reviewers_of(record_id)
+
+
+def can_decide(record_id: str, email: str) -> bool:
+    """이 record 를 승인/거절할 수 있는가: 관리자(전체) 또는 이 record 의 reviewer."""
+    return is_admin(email) or is_reviewer(record_id, email)
+
+
+def reviewing(email: str) -> list[str]:
+    """이 사람이 reviewer 로 지정된 record id 들."""
+    e = email.lower()
+    return sorted(r for r, v in reviewers_map().items() if e in v)
+
+
 def reset_cache() -> None:
     global _cache, _acache
     with _lock:
         _cache = None
         _acache = None
-
-
-# ── record 별 지정 승인자 ────────────────────────────────────────────────
-# Registry 는 승인 요청에 승인자를 붙일 자리가 없다. 컨테이너 DB 는 재배포 때 초기화되므로 같은 영속 저장소에 둔다.
-ASSIGN_PARAM = os.environ.get("APPROVERS_PARAM", "/ai-portal/approvers")
-_acache: tuple[float, dict[str, str]] | None = None
-
-
-def assignments() -> dict[str, str]:
-    """{recordId: 지정된 승인자 이메일}. 읽을 수 없으면 빈 매핑 → 지정이 없는 것으로 보고 모든 관리자가 처리 가능(fail open: 지정은 편의 기능)."""
-    global _acache
-    with _lock:
-        if _acache and time.monotonic() - _acache[0] < _TTL:
-            return dict(_acache[1])
-    try:
-        raw = json.loads(_ssm().get_parameter(Name=ASSIGN_PARAM)["Parameter"]["Value"])
-        m = {str(k): str(v).lower() for k, v in raw.items()} if isinstance(raw, dict) else {}
-    except ClientError as e:
-        if e.response["Error"]["Code"] != "ParameterNotFound":
-            log.warning("approvers parameter unreadable (%s)", e.response["Error"]["Code"])
-        m = {}
-    except (BotoCoreError, ValueError):
-        m = {}
-    with _lock:
-        _acache = (time.monotonic(), m)
-    return dict(m)
-
-
-def assign(record_id: str, email: str) -> None:
-    """record 의 승인자를 지정한다. 지정할 수 있는 사람은 현재 관리자뿐이다."""
-    global _acache
-    email = email.strip().lower()
-    if email not in all_admins():
-        raise ValueError("관리자가 아닌 사람은 승인자로 지정할 수 없습니다")
-    m = assignments(); m[record_id] = email
-    _ssm().put_parameter(Name=ASSIGN_PARAM, Type="String", Overwrite=True, Value=json.dumps(m),
-                         Description="ai-portal: record -> assigned approver")
-    with _lock:
-        _acache = (time.monotonic(), m)
-
-
-def clear_assignment(record_id: str) -> None:
-    global _acache
-    m = assignments()
-    if m.pop(record_id, None) is None:
-        return
-    _ssm().put_parameter(Name=ASSIGN_PARAM, Type="String", Overwrite=True, Value=json.dumps(m))
-    with _lock:
-        _acache = (time.monotonic(), m)
-
-
-def can_decide(record_id: str, email: str) -> bool:
-    """이 record 를 승인/거절할 수 있는가: 관리자이고, 지정된 승인자가 있다면 그 사람이어야 한다."""
-    email = email.lower()
-    if email not in all_admins():
-        return False
-    who = assignments().get(record_id)
-    return who is None or who == email or who not in all_admins()   # 지정된 사람이 더 이상 관리자가 아니면 막히지 않게 풀어 준다

@@ -1,5 +1,5 @@
 export type Role = "admin" | "user";
-export interface User { email: string; name: string; picture: string; role: Role }
+export interface User { email: string; name: string; picture: string; role: Role; can_review?: boolean; reviewing?: number }
 export interface PublicConfig { googleClientId: string; projectName: string }
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
@@ -51,8 +51,7 @@ export const selectRegistry = (registry_id: string) => callErr<unknown>("/api/re
 export const createRegistry = (body: unknown) => callErr<unknown>("/api/registries", json("POST", body));
 export const registerItem = (kind: Kind, id: number) => callErr<Item>(`/api/catalog/${kind}/${id}/register`, json("POST"));
 export const refreshRegistry = (kind: Kind, id: number) => callErr<Item & { registry_reason: string }>(`/api/catalog/${kind}/${id}/registry/refresh`, json("POST"));
-export const submitRegistry = (kind: Kind, id: number, approver = "") => callErr<Item>(`/api/catalog/${kind}/${id}/registry/submit`, json("POST", { approver }));
-export const listApprovers = () => callErr<{ approvers: { email: string }[] }>("/api/approvers");
+export const submitRegistry = (kind: Kind, id: number) => callErr<Item>(`/api/catalog/${kind}/${id}/registry/submit`, json("POST"));
 
 // ── prompt 테스트 (Gateway) ──
 export interface GwModel { id: string; provider: string; endpoint: "chat" | "messages" | null; usable: boolean }
@@ -92,7 +91,7 @@ export interface RegRecord {
   recordId: string; name: string; description: string; descriptorType: string; status: string;
   recordVersion: string; createdAt: string | null; updatedAt: string | null;
   portal: { id: number; kind: Kind; name: string; owner: string } | null;
-  approver?: string | null; can_decide?: boolean;
+  reviewers?: string[]; can_decide?: boolean;
 }
 export interface RegDetail extends RegRecord { statusReason: string; content: unknown; registryId: string }
 export const listApprovals = (status: RecStatus = "PENDING_APPROVAL") =>
@@ -177,3 +176,12 @@ export interface Dashboard {
 export const adminDashboard = () => callErr<Dashboard>("/api/admin/dashboard");
 export const myRecordsAll = () => callErr<{ items: Item[]; counts: Record<string, number>; total: number }>("/api/my/records?scope=all");
 export const registryDefaults = () => callErr<{ authorizer: "AWS_IAM" | "CUSTOM_JWT"; auto_approval: boolean }>("/api/registries/defaults");
+
+// ── record 별 reviewer (관리자 전용) ──
+export interface PickUser { email: string; name: string; is_admin: boolean; last_login: number | null }
+export const searchUsers = (q: string, limit = 20) =>
+  callErr<{ users: PickUser[]; total: number }>(`/api/reviewers/users?q=${encodeURIComponent(q)}&limit=${limit}`);
+export const getReviewers = (recordId: string) => callErr<{ reviewers: string[] }>(`/api/reviewers/${encodeURIComponent(recordId)}`);
+export const addReviewer = (record_id: string, email: string) => callErr<{ reviewers: string[] }>("/api/reviewers", json("POST", { record_id, email }));
+export const removeReviewer = (record_id: string, email: string) =>
+  callErr<{ reviewers: string[] }>(`/api/reviewers?record_id=${encodeURIComponent(record_id)}&email=${encodeURIComponent(email)}`, json("DELETE"));

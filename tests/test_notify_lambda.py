@@ -43,52 +43,53 @@ def lam(monkeypatch):
 def ev(rec="rec123456"): return {"detail": {"registryRecordId": rec, "registryId": "R"}, "time": "2026-11-04T08:00:00Z"}
 
 
-def test_assigned_approver_is_the_only_recipient(lam):
+def sent_to(ses): return sorted(t for t, _ in ses.sent)
+
+
+def test_admins_and_the_records_reviewers_are_notified(lam):
     m, ssm, ses = lam
-    ssm.params = {"/ai-portal/admins": ["second@x.com", "third@x.com"], "/ai-portal/approvers": {"rec123456": "Second@X.com"}}
-    assert m.handler(ev(), None) == {"sent": 1}
-    assert [t for t, _ in ses.sent] == ["second@x.com"]                              # 대소문자 정규화, 다른 관리자에게는 가지 않는다
-    assert "지정된 승인자" in ses.sent[0][1]
+    ssm.params = {"/ai-portal/admins": ["second@x.com"], "/ai-portal/reviewers": {"rec123456": ["Rev@X.com", "rev2@x.com"]}}
+    assert m.handler(ev(), None) == {"sent": 4}
+    assert sent_to(ses) == ["rev2@x.com", "rev@x.com", "root@x.com", "second@x.com"]               # 정규화, 관리자 + reviewer
+    body = dict(ses.sent)
+    assert "관리자" in body["root@x.com"] and "reviewer" in body["rev@x.com"]
 
 
-def test_unassigned_goes_to_every_admin(lam):
+def test_a_reviewer_is_not_told_about_other_records(lam):
     m, ssm, ses = lam
-    ssm.params = {"/ai-portal/admins": ["second@x.com"]}
-    assert m.handler(ev(), None) == {"sent": 2}
-    assert sorted(t for t, _ in ses.sent) == ["root@x.com", "second@x.com"] and "모든 관리자" in ses.sent[0][1]
+    ssm.params = {"/ai-portal/reviewers": {"OTHER9999": ["rev@x.com"]}}
+    m.handler(ev("rec123456"), None)
+    assert sent_to(ses) == ["root@x.com"]                                                           # reviewer 는 자기 record 알림만
 
 
-def test_assignment_for_other_record_does_not_leak(lam):
+def test_no_reviewers_means_admins_only(lam):
     m, ssm, ses = lam
-    ssm.params = {"/ai-portal/admins": ["second@x.com"], "/ai-portal/approvers": {"OTHER9999": "second@x.com"}}
-    m.handler(ev(), None)
-    assert sorted(t for t, _ in ses.sent) == ["root@x.com", "second@x.com"]
+    assert m.handler(ev(), None) == {"sent": 1} and sent_to(ses) == ["root@x.com"]
 
 
-def test_assignee_no_longer_admin_falls_back_to_all_admins(lam):
+def test_someone_who_is_both_admin_and_reviewer_gets_one_mail(lam):
     m, ssm, ses = lam
-    ssm.params = {"/ai-portal/admins": [], "/ai-portal/approvers": {"rec123456": "removed@x.com"}}
-    m.handler(ev(), None)
-    assert [t for t, _ in ses.sent] == ["root@x.com"]                                # 요청이 아무에게도 안 가는 일이 없다
+    ssm.params = {"/ai-portal/admins": ["second@x.com"], "/ai-portal/reviewers": {"rec123456": ["second@x.com", "rev@x.com"]}}
+    assert m.handler(ev(), None) == {"sent": 3} and sent_to(ses).count("second@x.com") == 1
 
 
-def test_ssm_outage_notifies_seed_admins(lam):
+def test_ssm_outage_notifies_seed_admins_only(lam):
     m, ssm, ses = lam
     ssm.fail = True
-    assert m.handler(ev(), None) == {"sent": 1} and [t for t, _ in ses.sent] == ["root@x.com"]
+    assert m.handler(ev(), None) == {"sent": 1} and sent_to(ses) == ["root@x.com"]                  # reviewer 확인 불가 → 권한을 넓히지 않는다
 
 
 def test_one_failed_recipient_does_not_block_the_others(lam):
     m, ssm, ses = lam
-    ssm.params = {"/ai-portal/admins": ["bad@x.com", "ok@x.com"]}; ses.fail_for = {"bad@x.com"}
-    assert m.handler(ev(), None) == {"sent": 2}                                       # root + ok
-    assert "bad@x.com" not in [t for t, _ in ses.sent]
+    ssm.params = {"/ai-portal/reviewers": {"rec123456": ["bad@x.com", "ok@x.com"]}}; ses.fail_for = {"bad@x.com"}
+    assert m.handler(ev(), None) == {"sent": 2}
+    assert "bad@x.com" not in sent_to(ses) and "ok@x.com" in sent_to(ses)
 
 
 def test_link_points_to_the_review_page_and_bad_ids_are_ignored(lam):
     m, ssm, ses = lam
     m.handler(ev("rec123456"), None)
-    assert "https://portal.example.com/approvals/rec123456" in ses.sent[0][1]         # 끝의 / 정리
+    assert "https://portal.example.com/approvals/rec123456" in ses.sent[0][1]
     n = len(ses.sent)
     for bad in ("../../etc", "a b", "x", "", "<script>"):
         assert m.handler(ev(bad), None) == {"sent": 0}

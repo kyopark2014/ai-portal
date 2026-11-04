@@ -189,7 +189,7 @@ def _ensure_notify_role() -> str:
         "Version": "2012-10-17", "Statement": [
             {"Sid": "ReadApprovers", "Effect": "Allow", "Action": "ssm:GetParameter",
              "Resource": [f"arn:aws:ssm:{region}:{account_id}:parameter/{project_name}/admins",
-                          f"arn:aws:ssm:{region}:{account_id}:parameter/{project_name}/approvers"]},
+                          f"arn:aws:ssm:{region}:{account_id}:parameter/{project_name}/reviewers"]},
             # SES 는 발신 ID 뿐 아니라 수신 주소(identity/<주소>)도 리소스로 검사한다. 수신자는 관리자 목록에서 동적으로
             # 정해지므로 리소스는 이 계정의 SES ID 전체로 열고, 대신 "보낸 사람" 을 조건으로 우리 주소 하나에 고정한다.
             {"Sid": "SendMail", "Effect": "Allow", "Action": "ses:SendEmail",
@@ -210,7 +210,7 @@ def ensure_approval_notifications(registry_id: str, origin: Optional[str] = None
     role = _ensure_notify_role()
     cfg = {"Environment": {"Variables": {
         "SENDER": _notify_sender(), "PORTAL_ORIGIN": origin, "ADMIN_EMAILS": ADMIN_EMAILS,
-        "ADMINS_PARAM": f"/{project_name}/admins", "APPROVERS_PARAM": f"/{project_name}/approvers"}},
+        "ADMINS_PARAM": f"/{project_name}/admins", "REVIEWERS_PARAM": f"/{project_name}/reviewers"}},
         "Timeout": 30, "MemorySize": 128}
     zipped = _package_notify_zip()
     try:
@@ -415,10 +415,10 @@ def create_ecs_roles(secret_arns: List[str]) -> Dict[str, str]:
                 "bedrock-agentcore:InvokeAgentRuntimeForUser",
                 # Skill 테스트: harness 세션에 Node.js 설치
                 "bedrock-agentcore:InvokeAgentRuntimeCommand"]},
-            # 화면에서 추가한 승인자 목록과 record 별 지정 승인자는 재배포로 사라지지 않도록 SSM Parameter Store 에 둔다
+            # 화면에서 추가한 관리자 목록과 record 별 reviewer 는 재배포로 사라지지 않도록 SSM Parameter Store 에 둔다
             {"Sid": "ApproverStore", "Effect": "Allow", "Action": ["ssm:GetParameter", "ssm:PutParameter"],
              "Resource": [f"arn:aws:ssm:{region}:{account_id}:parameter/{project_name}/admins",
-                          f"arn:aws:ssm:{region}:{account_id}:parameter/{project_name}/approvers"]},
+                          f"arn:aws:ssm:{region}:{account_id}:parameter/{project_name}/reviewers"]},
             {"Sid": "RegistryRecords", "Effect": "Allow", "Resource": "*", "Action": [
                 "bedrock-agentcore:CreateRegistry", "bedrock-agentcore:CreateRegistryRecord",
                 "bedrock-agentcore:GetRegistryRecord", "bedrock-agentcore:ListRegistryRecords",

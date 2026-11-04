@@ -61,7 +61,7 @@ export default function App() {
       {user && (
         <nav className="nav" aria-label="주 메뉴">
           <button className={page === "explore" ? "on" : ""} onClick={() => setPage("explore")}>레지스트리 탐색</button>
-          {user.role === "admin" && <button className={page === "approvals" ? "on" : ""} onClick={() => setPage("approvals")}>승인</button>}
+          {user.can_review && <button className={page === "approvals" ? "on" : ""} onClick={() => setPage("approvals")}>승인</button>}
           {user.role === "admin" && <button className={page === "admin" ? "on" : ""} onClick={() => setPage("admin")}>관리</button>}
           <button className={page === "home" ? "on" : ""} onClick={() => setPage("home")}>내 정보</button>
         </nav>
@@ -78,9 +78,9 @@ export default function App() {
             : <p className="note error">GOOGLE_CLIENT_ID 가 설정되지 않았습니다.</p>}
         </section>
       ) : page === "approvals" || openRec ? (
-        user.role === "admin"
-          ? <Approvals openId={openRec} onOpened={() => { setOpenRec(null); setPage("approvals"); history.replaceState(null, "", "/"); }} />
-          : <section className="card"><h2>권한이 없습니다</h2><p className="sub">승인은 관리자만 할 수 있습니다. 관리자 계정으로 다시 로그인하세요.</p>
+        user.can_review
+          ? <Approvals isAdmin={user.role === "admin"} openId={openRec} onOpened={() => { setOpenRec(null); setPage("approvals"); history.replaceState(null, "", "/"); }} />
+          : <section className="card"><h2>권한이 없습니다</h2><p className="sub">승인은 관리자와, 관리자가 reviewer 로 지정한 사람만 할 수 있습니다. 해당 계정으로 다시 로그인하세요.</p>
               <button className="btn ghost" onClick={onLogout}>로그아웃</button></section>
       ) : page === "admin" && user.role === "admin" ? (
         <AdminDashboard />

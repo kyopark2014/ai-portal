@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agent_test, approvals, auth, catalog, chat, db, mcp_test
+from . import admins, agent_test, approvals, auth, catalog, chat, db, mcp_test
 
 DIST = Path(__file__).resolve().parent / "web" / "dist"
 _docs = os.environ.get("ENABLE_API_DOCS") == "1"
@@ -42,7 +42,13 @@ def require_admin(user: auth.User = Depends(current_user)) -> auth.User:
 
 
 def _user_json(u: auth.User) -> dict:
-    return {"email": u.email, "name": u.name, "picture": u.picture, "role": u.role}
+    # can_review: 관리자이거나 한 record 라도 reviewer 로 지정됨 → 화면의 "승인" 메뉴 표시 여부. 실제 권한은 서버가 요청마다 판단한다.
+    try:
+        reviewing = len(admins.reviewing(u.email))
+    except Exception:  # noqa: BLE001 — 저장소 장애여도 로그인/조회는 막지 않는다(fail closed: reviewer 로 보지 않음)
+        reviewing = 0
+    return {"email": u.email, "name": u.name, "picture": u.picture, "role": u.role,
+            "can_review": u.role == "admin" or reviewing > 0, "reviewing": reviewing}
 
 
 @app.get("/api/health")
@@ -104,6 +110,7 @@ app.include_router(mcp_test.router)
 app.include_router(agent_test.router)
 app.include_router(approvals.router)
 app.include_router(approvals.admins_router)
+app.include_router(approvals.reviewers_router)
 app.include_router(approvals.dashboard_router)
 
 
