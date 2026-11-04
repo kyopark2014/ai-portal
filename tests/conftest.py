@@ -24,3 +24,25 @@ def _isolate_ssm(monkeypatch):
     admins.reset_cache()
     yield
     admins.reset_cache()
+
+
+# ── 저장소 전환: PORTAL_STORE=dynamodb pytest 로 전체 테스트를 DynamoDB(moto) 위에서 다시 돌릴 수 있다 ──
+import os
+
+if os.environ.get("PORTAL_STORE") == "dynamodb":
+    import boto3
+    from moto import mock_aws
+
+    @pytest.fixture(autouse=True)
+    def _fake_dynamodb(monkeypatch):
+        from application import db_dynamo
+        with mock_aws():
+            monkeypatch.setenv("AWS_ACCESS_KEY_ID", "x"); monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "x")
+            monkeypatch.setenv("AWS_REGION", "us-west-2"); monkeypatch.setenv("DDB_TABLE", "ai-portal-test")
+            boto3.client("dynamodb", region_name="us-west-2").create_table(
+                TableName="ai-portal-test", BillingMode="PAY_PER_REQUEST",
+                KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}, {"AttributeName": "sk", "KeyType": "RANGE"}],
+                AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}, {"AttributeName": "sk", "AttributeType": "S"}])
+            db_dynamo.reset_for_tests(None)
+            yield
+            db_dynamo.reset_for_tests(None)

@@ -5,7 +5,7 @@ Prompt · MCP · Agent · Skill 을 카탈로그로 탐색·등록하고, 등록
 
 - 구조: FastAPI REST(`/api/*`) + React(Vite) SPA, 한 컨테이너(:8501)로 ECS 배포 (agentic-work 방식)
 - 로그인: Google. 관리자는 `ADMIN_EMAILS`(기본 `e2npark@gmail.com`), 그 외 로그인 사용자는 일반 사용자
-- 저장소: SQLite(`application/data/portal.db`) — 목록·설명·Registry 연결 정보
+- 저장소: **배포 환경은 DynamoDB**(재배포해도 유지), 로컬 개발·테스트는 SQLite(`application/data/portal.db`) — 목록·설명·Registry 연결·등록자·로그인 기록
 
 ```
 브라우저 ─ Google ID token ─▶ POST /api/auth/google ─▶ HttpOnly 서명 쿠키
@@ -98,7 +98,7 @@ cp .env.example .env     # GOOGLE_CLIENT_ID, LLM_GATEWAY_KEY 등 입력
 ```
 - Google Cloud Console → OAuth client → **Authorized JavaScript origins** 에 `http://localhost:8501` 과 배포 오리진을 추가해야 로그인됩니다.
 - 프런트만 개발: `cd application/web && npm run dev` (:5173, `/api` 는 :8501 로 프록시)
-- 테스트: `.venv/bin/python -m pytest` (테스트는 실제 AWS 를 호출하면 실패하도록 막혀 있음)
+- 테스트: `pip install -r requirements-dev.txt && .venv/bin/python -m pytest` (테스트는 실제 AWS 를 호출하면 실패하도록 막혀 있음). 같은 전체 테스트를 DynamoDB 구현(moto)으로 돌리려면 `PORTAL_STORE=dynamodb pytest --ignore=tests/test_store_parity.py`. `test_store_parity.py` 는 두 저장소가 같은 결과를 내는지 직접 비교합니다.
 - AWS 자격 증명과 리전(`AWS_REGION`, 기본 `us-west-2`)이 필요합니다.
 
 ## 환경 변수 (`.env.example`)
@@ -113,7 +113,9 @@ cp .env.example .env     # GOOGLE_CLIENT_ID, LLM_GATEWAY_KEY 등 입력
 | `PORTAL_ORIGIN` | 승인 요청 메일의 링크 기준 주소(배포 오리진). 비우면 `config.json` 의 `sharing_url`, 없으면 `http://localhost:8501` |
 | `GATEWAY_REGIONS` | MCP Gateway 를 가져올 리전(쉼표 구분). 비우면 `AWS_REGION` + us-east-1 |
 | `REGISTRY_ID` | (선택) Registry 지정. 기본은 `application/config.json` 의 `registry_id` |
-| `PORTAL_DB_PATH` | (선택) SQLite 경로 |
+| `PORTAL_STORE` | `dynamodb` 면 DynamoDB, 아니면 SQLite(기본). 배포(ECS)에서는 `dynamodb` 로 설정됨 |
+| `DDB_TABLE` | DynamoDB 테이블 이름(기본 `ai-portal`) |
+| `PORTAL_DB_PATH` | (선택) SQLite 경로 — 로컬 전용 |
 
 ## 기능
 
@@ -137,7 +139,7 @@ cp .env.example .env     # GOOGLE_CLIENT_ID, LLM_GATEWAY_KEY 등 입력
 - **reviewer (record 별 승인 권한)**: **관리자는 항상 모든 record 를 승인**할 수 있고, 관리자가 record 마다 **reviewer 를 추가**하면 그 사람은 **그 record 만** 승인·거절할 수 있습니다(요청자는 승인자를 고르지 않습니다). 관리자는 Prompt/MCP/Skill/Agent 카드 메뉴(또는 목록, 상세 화면)의 **Add reviewer**에서 사용자를 **이메일·이름으로 검색**해 고릅니다(서버가 매 입력마다 검색해 일부만 내려주므로 사용자가 많아도 동작). reviewer 는 승인 메뉴에서 자기에게 지정된 record 만 보이고(그 외는 404), Deprecate·reviewer/관리자 관리·대시보드는 쓸 수 없습니다. reviewer 정보는 SSM `/ai-portal/reviewers` 에 저장되어 재배포 후에도 유지되며, SSM 을 읽지 못하면 reviewer 권한은 인정하지 않고 관리자만 승인합니다(fail closed). record 가 삭제·취소되면 그 reviewer 정보도 정리됩니다. 종류 단위(예: Skill 전체) reviewer 는 없고 record 별로만 지정합니다.
 - **관리자 관리**: 승인 메뉴의 "승인자 관리" 탭(관리자만)에서 **관리자**를 추가·제거합니다(바로 반영, 재배포 불필요). 최초 관리자(`ADMIN_EMAILS`)와 자기 자신은 지울 수 없습니다. 목록은 컨테이너 DB 가 아니라 **SSM Parameter Store**(`/ai-portal/admins`)에 저장되며, SSM 을 읽지 못하면 최초 관리자만 관리자로 인정합니다(fail closed).
 - **내 레코드**: "내 정보"에서 내가 만든 항목을 종류·Registry 상태별로 봅니다(승인 대기·거절·초안 포함, 상태 필터, Open 으로 상세). 관리자는 "내 것 / 전체" 를 전환해 모든 사용자의 항목(소유자 포함)을 볼 수 있고, 일반 사용자의 `scope=all` 요청은 403 입니다.
-- **관리 대시보드(관리자)**: "관리" 메뉴. ① 접속 통계(접속한 사용자·최근 7일 활성·총 로그인) ② **Registry 등록 현황** — type(Prompt/MCP/Skill/Agent)별 승인·진행 상태 개수(AWS Registry 를 직접 조회) ③ **사용자 표** — 로그인 횟수·마지막 접속·소유한 항목을 type 별·상태별로 ④ 최근 접속 ⑤ 레지스트리 관리(Registry 선택, 새 Registry 생성). 접속 기록은 **이메일·이름·시각만** 저장하고(프로필 사진 URL 은 저장 안 함) 컨테이너 SQLite 라 재배포하면 초기화됩니다.
+- **관리 대시보드(관리자)**: "관리" 메뉴. ① 접속 통계(접속한 사용자·최근 7일 활성·총 로그인) ② **Registry 등록 현황** — type(Prompt/MCP/Skill/Agent)별 승인·진행 상태 개수(AWS Registry 를 직접 조회) ③ **사용자 표** — 로그인 횟수·마지막 접속·소유한 항목을 type 별·상태별로 ④ 최근 접속 ⑤ 레지스트리 관리(Registry 선택, 새 Registry 생성). 접속 기록은 **이메일·이름·시각만** 저장하고(프로필 사진 URL 은 저장 안 함) DynamoDB 에 있어 재배포해도 유지됩니다.
 - **Registry 생성 기본값**: 인증 **IAM**, auto-approval **꺼짐**(수동 승인). 화면에서 JWT(OIDC discovery URL 필수) 나 auto-approval 켜기도 고를 수 있고, 켜면 경고가 나옵니다.
 - **승인(관리자)**: 상단 "승인" 메뉴 또는 메일 링크(`/approvals/<recordId>`). Registry 를 직접 조회해 대기·승인됨·거절됨·Deprecated 탭으로 보고, record 내용을 검토한 뒤 승인/거절(사유 필수)/Deprecate 합니다. AWS 의 현재 상태를 확인하고 처리해 이중 처리를 막으며(409), 사유에 처리자 이메일(`[by …]`)을 남깁니다. 일반 사용자는 403.
 - **삭제**: Registry record → Prompt Management → 포털 DB 순. record 가 `CREATING` 이면 409(등록 직후 몇 초간 삭제 불가). AWS 동기화 항목은 포털 목록에서만 지워짐.
@@ -150,10 +152,12 @@ cp .env.example .env     # GOOGLE_CLIENT_ID, LLM_GATEWAY_KEY 등 입력
 python installer.py --registry-only        # Registry `ai-portal` 만
 python installer.py --notifications-only   # 승인 요청 메일 알림만
 python installer.py --harness-only         # MCP 테스트용 harness agent `ai_portal` 만
+python installer.py --table-only           # DynamoDB 저장소 테이블만
 python installer.py --domain-only          # 커스텀 도메인(인증서·CloudFront 별칭·DNS)만
 python installer.py                        # 전체 (VPC·ALB·ECR·ECS Fargate·CloudFront)
 python installer.py --skip-docker-build    # 이미지 재빌드 없이
 ```
+- **DynamoDB 테이블 `ai-portal`**: 포털 데이터(등록 항목·**등록자**·로그인 기록·설정)의 영구 저장소. 온디맨드(요청당 과금, 이 규모에서는 월 비용이 거의 없음)에 **삭제 보호**와 **PITR(35일 시점 복구)** 를 켭니다. 키는 `pk`/`sk` 하나의 테이블이며(`ITEM#<kind>`, `LOGIN#<email>`, `SETTING`, `COUNTER`), 정수 id 는 원자 카운터로 발급해 기존 API·화면이 그대로 동작합니다. 목록·검색·통계는 데이터가 작아(수백 건 이하) 서버에서 필터·집계합니다. task role 은 이 테이블 하나에만 권한이 있습니다.
 - **Harness agent `ai_portal`**: MCP 테스트용(`harness-work` 방식). `harnessName` 은 하이픈 불가라 `ai_portal`. 모델 `us.anthropic.claude-sonnet-5-5`, 전용 역할 `role-harness-for-ai-portal-us-west-2`(Bedrock 모델 호출 + `InvokeGateway` + harness 메모리). ID/ARN 은 `application/config.json`(`harness_id`, `harness_arn`) (값은 `config.json` 의 `harness_id` 참조). 도구는 호출마다 지정하므로 harness 자체는 MCP 와 무관합니다.
 - **Registry `ai-portal`**: IAM 인증, auto-approval 꺼짐. ID 는 `application/config.json`(`registry_id`)에 기록 (us-west-2, 값은 `config.json` 의 `registry_id` 참조).
 - **승인 요청 메일**: EventBridge 규칙 `ai-portal-approval-requested`(`Registry Record State changed to Pending Approval`, 이 Registry 만) → Lambda `ai-portal-approval-notify`(`lambda-notify/`) → **SES**. 수신자는 **모든 관리자 + 그 record 에 지정된 reviewer** 입니다(reviewer 는 자기 record 알림만 받고, 관리자와 겹치면 한 통만). 메일에 승인 링크(`{PORTAL_ORIGIN}/approvals/<recordId>`)가 들어갑니다. 발신 주소는 `ai-portal@my-agentic-ai.click` 하나로 IAM 조건 키로 고정되고, 도메인은 DKIM 인증을 마쳤습니다. **SES 샌드박스 제약**: 이 계정의 SES 는 프로덕션 액세스가 꺼져 있어, *인증된 수신 주소로만* 발송됩니다(하루 200통). 승인자를 추가할 때마다 그 주소를 SES 에 등록·인증하거나 SES 프로덕션 액세스를 신청해야 합니다. 링크 주소를 바꾸려면 `PORTAL_ORIGIN` 설정 후 `--notifications-only` 를 다시 실행합니다.
@@ -187,14 +191,14 @@ python installer.py --skip-docker-build    # 이미지 재빌드 없이
 ## 알아둘 제약
 - **SES 샌드박스**: 승인 알림은 인증된 수신 주소로만 발송됩니다. 새 승인자를 추가하면 그 주소를 SES 에 등록·인증해야 메일을 받습니다(프로덕션 액세스를 신청하면 해소).
 - **harness 의 description**: harness 에는 설명 필드가 없어 동기화 시 알려진 harness 의 기본 설명을 씁니다(`ai_portal` → "AI Portal 운영을 위한 Agent"). 사용자가 고친 설명은 유지됩니다. 또 **승인된 Registry record 의 설명이나 내용을 수정하면 record 가 `DRAFT` 로 되돌아가 다시 승인을 받아야 합니다.**
-- **배포본과 로컬의 DB 는 별개**: Registry 에 record 가 있어도 포털 항목과의 연결은 각 서버의 SQLite 에 있습니다. 서버는 로그인 시 동기화(Registry 복원 포함)로 채워집니다. 복원된 항목의 소유자는 `registry` 입니다.
-- **배포 중 일시 중단**: 단일 태스크(desired=1, `minimumHealthyPercent=0`)라 재배포 동안(수 분) 503 이 됩니다. 무중단은 태스크 2개 이상 + 영구 저장소가 필요합니다.
+- **배포본과 로컬의 데이터는 별개**: 배포본은 DynamoDB, 로컬은 SQLite 를 씁니다. Registry 에 record 가 있어도 포털 항목과의 연결·등록자는 각 저장소에 있습니다. 배포본은 로그인 시 동기화(Registry 복원 포함)로 비어 있는 부분을 채우며, 저장소가 유지되므로 재배포 후에도 등록자·편집한 설명이 사라지지 않습니다. 단, **저장소를 도입하기 전에 만든 등록자 정보는 복원되지 않습니다**(복원된 항목의 소유자는 `registry`).
+- **배포 중 일시 중단**: 단일 태스크(desired=1, `minimumHealthyPercent=0`)라 재배포 동안(약 7분) 503 이 됩니다. 영구 저장소(DynamoDB)가 생겨 데이터는 유지되지만, 무중단 배포는 태스크를 2개 이상으로 늘리고 `minimumHealthyPercent` 를 올리는 별도 작업이 필요합니다.
 - **동기화 항목의 공개 범위**: AWS 에서 가져온 항목(harness·runtime·Gateway·AWS 의 prompt)은 Registry 에 등록·승인되기 전에는 승인 상태가 없어 일반 사용자에게 보이지 않습니다. 관리자가 Registry 에 등록해 승인해야 공개됩니다. 포털의 승인 상태는 "상태 확인"·승인 처리 때만 갱신되므로 AWS 콘솔에서 직접 처리하면 늦게 반영됩니다.
 - **Gateway 동기화 범위**: 기본은 `AWS_REGION`(us-west-2) + us-east-1 이며 `GATEWAY_REGIONS`(쉼표 구분)로 바꿉니다. 리전별로 독립 처리해 한 리전 조회가 실패해도 그 리전의 기존 항목은 유지됩니다(같은 Gateway ID 가 리전마다 있어도 구분됨). Gateway 의 target(도구) 목록은 아직 보여주지 않습니다.
 - **승인 요청 취소**: AWS 가 `PENDING_APPROVAL → DRAFT` 되돌림을 지원하지 않고, `REJECTED` 로 바꾸면 재제출이 막힙니다. 그래서 취소는 record 를 **삭제**하고 연결을 비웁니다(다시 등록해야 함). 이미 간 알림 메일은 회수되지 않습니다. Prompt 본문·버전은 Prompt Management 에 남습니다.
 - **승인의 의미**: 승인은 Registry 검색에 노출될지만 정합니다. 승인된 MCP·agent 의 실제 사용 권한(IAM/OAuth)은 별도입니다. 메일 링크는 로그인한 관리자만 열 수 있어 전달돼도 일반 사용자는 승인할 수 없습니다.
 - **Registry 삭제와 Prompt**: 삭제는 record 를 먼저 지워 "가리키는 대상 없는 record" 가 남지 않게 합니다.
-- **SQLite 영속성**: ECS 컨테이너 로컬이라 재배포 시 사라집니다(prompt·agent 는 재동기화되지만 MCP·Skill 등록 정보와 편집한 설명은 유실). 영구 저장소(EFS 등)는 미정.
+- **DynamoDB 규모 가정**: 목록·검색·통계를 서버에서 필터·집계하므로(Scan) 항목이 수천 건을 넘으면 GSI·집계 테이블이 필요합니다. 정수 id 는 단일 카운터(원자 증가)로 발급하며 현재 규모에서는 병목이 아닙니다. 로컬 SQLite 로 만든 데이터는 DynamoDB 로 자동 이전되지 않습니다.
 - **Gateway 키 공유**: 현재 agentic-work 의 키를 복사해 사용 중이라 사용량이 그쪽에 합산됩니다. 별도 키 발급 권장. 로그인한 모든 사용자가 같은 키로 호출합니다(사용자별 제한 없음).
 - **Gateway 모델**: 목록에 보여도 키·구독 상태에 따라 호출이 실패할 수 있습니다(예: Marketplace 구독 필요, 일부 모델 400/502).
 - `application/config.json`(계정 ID·Registry ARN·CloudFront ID 등 계정 고유 값)은 `installer.py` 가 만드는 파일이며 **저장소에 올리지 않습니다**(`.gitignore`). 새로 clone 했다면 `python installer.py`(또는 `--registry-only`)로 다시 만들거나 `REGISTRY_ID`·`HARNESS_ARN` 환경 변수를 지정하세요.
@@ -209,4 +213,3 @@ python installer.py --skip-docker-build    # 이미지 재빌드 없이
 - Gateway target(도구) 목록
 - Registry **hybrid 검색**(`SearchRegistryRecords`) 과 Registry 기준 목록
 - 이벤트·감사 로그 패널
-- SQLite 영구 저장소(현재 컨테이너 로컬이라 재배포 시 유실 — 등록 항목은 Registry 에서 복원되지만 MCP 헤더·소유자·편집한 설명은 복원 안 됨)

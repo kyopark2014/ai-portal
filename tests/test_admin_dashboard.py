@@ -1,3 +1,4 @@
+import os
 import pytest
 from fastapi.testclient import TestClient
 
@@ -36,11 +37,12 @@ def test_login_is_recorded_with_email_and_name_only(env, monkeypatch):
     c = TestClient(server.app)
     assert c.post("/api/auth/google", json={"credential": "x"}).status_code == 200
     c.post("/api/auth/google", json={"credential": "x"})
-    with db.conn() as k:
-        cols = [r[1] for r in k.execute("PRAGMA table_info(login_events)")]
-        rows = k.execute("SELECT * FROM login_events").fetchall()
-    assert cols == ["id", "email", "name", "logged_at"] and "picture" not in cols          # 사진 URL 은 저장하지 않는다
+    rows = db.recent_logins(10)                                                          # 저장소와 무관하게 공개 함수로 확인
     assert [r["email"] for r in rows] == ["foo@x.com", "foo@x.com"] and rows[0]["name"] == "Foo"
+    assert set(rows[0]) == {"email", "name", "logged_at"} and "p/x.png" not in str(rows)   # 사진 URL 은 어디에도 없다
+    if os.environ.get("PORTAL_STORE") != "dynamodb":                                     # SQLite 는 테이블 스키마까지 확인
+        with db.conn() as k:
+            assert [r[1] for r in k.execute("PRAGMA table_info(login_events)")] == ["id", "email", "name", "logged_at"]
 
 
 def test_recording_failure_never_blocks_login(env, monkeypatch):

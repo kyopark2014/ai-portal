@@ -57,9 +57,8 @@ def _record_id(record_id: str) -> str:
 
 
 def _portal_item(record_id: str) -> dict | None:
-    with db.conn() as c:
-        r = c.execute("SELECT id, kind, name, owner FROM items WHERE registry_record_id=?", (record_id,)).fetchone()
-    return dict(r) if r else None
+    it = db.find_by_record(record_id)
+    return {"id": it["id"], "kind": it["kind"], "name": it["name"], "owner": it["owner"]} if it else None
 
 
 def _summary(r: dict) -> dict:

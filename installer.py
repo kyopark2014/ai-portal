@@ -337,6 +337,37 @@ def ensure_harness() -> Dict[str, str]:
     return info
 
 
+# ── 1d. 영구 저장소 (DynamoDB) ──────────────────────────────────────────
+DDB_TABLE = project_name                    # 테이블 이름 = 프로젝트 이름
+
+
+def ensure_table() -> str:
+    """포털 데이터(등록 항목·등록자·로그인 기록·설정) 저장소. 컨테이너 DB 와 달리 재배포해도 유지된다.
+
+    온디맨드(요청당 과금)라 이 규모에서는 월 비용이 거의 없고, 삭제 보호와 PITR(35일 복구)을 켠다.
+    """
+    ddb = session.client("dynamodb")
+    try:
+        desc = ddb.describe_table(TableName=DDB_TABLE)["Table"]
+        logger.warning("DynamoDB table exists: %s (%s)", DDB_TABLE, desc["TableStatus"])
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ResourceNotFoundException":
+            raise
+        ddb.create_table(TableName=DDB_TABLE, BillingMode="PAY_PER_REQUEST", DeletionProtectionEnabled=True,
+                         KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}, {"AttributeName": "sk", "KeyType": "RANGE"}],
+                         AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}, {"AttributeName": "sk", "AttributeType": "S"}],
+                         Tags=TAGS)
+        logger.info("Created DynamoDB table %s", DDB_TABLE)
+    ddb.get_waiter("table_exists").wait(TableName=DDB_TABLE)
+    try:
+        ddb.update_continuous_backups(TableName=DDB_TABLE, PointInTimeRecoverySpecification={"PointInTimeRecoveryEnabled": True})
+    except ClientError as e:
+        logger.warning("PITR not enabled: %s", e.response["Error"]["Code"])
+    arn = ddb.describe_table(TableName=DDB_TABLE)["Table"]["TableArn"]
+    save_config(ddb_table=DDB_TABLE, ddb_table_arn=arn)
+    return arn
+
+
 # ── 2. Secrets ──────────────────────────────────────────────────────
 def ensure_session_secret() -> str:
     name = f"{project_name}/session-signing-key"
@@ -419,6 +450,9 @@ def create_ecs_roles(secret_arns: List[str]) -> Dict[str, str]:
             {"Sid": "ApproverStore", "Effect": "Allow", "Action": ["ssm:GetParameter", "ssm:PutParameter"],
              "Resource": [f"arn:aws:ssm:{region}:{account_id}:parameter/{project_name}/admins",
                           f"arn:aws:ssm:{region}:{account_id}:parameter/{project_name}/reviewers"]},
+            # 영구 저장소: 이 테이블 하나만. Scan 은 통계·검색을 서버에서 집계하기 위한 것(데이터가 작다)
+            {"Sid": "PortalTable", "Effect": "Allow", "Resource": [f"arn:aws:dynamodb:{region}:{account_id}:table/{DDB_TABLE}"],
+             "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:Scan"]},
             {"Sid": "RegistryRecords", "Effect": "Allow", "Resource": "*", "Action": [
                 "bedrock-agentcore:CreateRegistry", "bedrock-agentcore:CreateRegistryRecord",
                 "bedrock-agentcore:GetRegistryRecord", "bedrock-agentcore:ListRegistryRecords",
@@ -633,6 +667,7 @@ def deploy_ecs(net: Dict[str, Any], alb: Dict[str, str], roles: Dict[str, str], 
         "PORTAL_ORIGIN": public_origin,
         "LLM_GATEWAY_URL": read_env_file("LLM_GATEWAY_URL") or "https://llm.my-agentic-ai.click",
         # config.json 은 이미지에 넣지 않는다(.dockerignore) — 앱이 쓰는 값은 환경 변수로 전달한다
+        "PORTAL_STORE": "dynamodb", "DDB_TABLE": DDB_TABLE,        # 재배포해도 유지되는 저장소
         "REGISTRY_ID": load_config().get("registry_id", ""),
         "HARNESS_ARN": load_config().get("harness_arn", ""),
         "GATEWAY_REGIONS": read_env_file("GATEWAY_REGIONS"),
@@ -816,6 +851,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="AI Portal installer")
     ap.add_argument("--registry-only", action="store_true", help="Registry 만 생성하고 종료")
     ap.add_argument("--notifications-only", action="store_true", help="승인 요청 메일 알림만 구성하고 종료")
+    ap.add_argument("--table-only", action="store_true", help="DynamoDB 저장소 테이블만 만들고 종료")
     ap.add_argument("--harness-only", action="store_true", help="MCP 테스트용 harness agent 만 생성하고 종료")
     ap.add_argument("--domain-only", action="store_true", help="커스텀 도메인(인증서·CloudFront 별칭·DNS)만 설정하고 종료")
     ap.add_argument("--auto-approval", action="store_true", help="Registry auto-approval 켜기(기본: 꺼짐)")
@@ -825,6 +861,9 @@ def main() -> None:
 
     logger.info("Project=%s Region=%s Account=%s", project_name, region, account_id)
     t0 = time.time()
+    if args.table_only:
+        ensure_table()
+        return
     if args.harness_only:
         ensure_harness()
         return
@@ -843,6 +882,7 @@ def main() -> None:
         return
 
     ensure_harness()
+    ensure_table()
     secret_arn = ensure_session_secret()
     gateway_secret_arn = ensure_gateway_secret()
     roles = create_ecs_roles([secret_arn] + ([gateway_secret_arn] if gateway_secret_arn else []))
