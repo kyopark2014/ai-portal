@@ -77,6 +77,7 @@ def _row(r: dict) -> dict:
     d["desc_edited"] = bool(d.get("desc_edited", 0))
     for k in ("ext_id", "registry_id", "registry_record_id", "registry_status"):
         d[k] = d.get(k) or None
+    d["status_changed_at"] = d.get("status_changed_at") or None
     return d
 
 
@@ -157,7 +158,10 @@ def update_item(item_id: int, **fields: Any) -> None:
     if cur is None:
         return                                                             # 이미 지워진 항목: 조용히 무시(SQLite UPDATE 와 동일)
     sets, names, vals = [], {}, {}
-    for i, (k, v) in enumerate({**fields, "updated_at": time.time()}.items()):
+    extra = {"updated_at": time.time()}
+    if "registry_status" in fields and (cur.get("registry_status") or "") != (fields["registry_status"] or ""):
+        extra["status_changed_at"] = time.time()                           # 상태가 실제로 바뀐 때만
+    for i, (k, v) in enumerate({**fields, **extra}.items()):
         names[f"#f{i}"], vals[f":v{i}"] = k, _num(json.dumps(v) if k == "data" else ("" if v is None and k != "desc_edited" else v))
         sets.append(f"#f{i} = :v{i}")
     try:

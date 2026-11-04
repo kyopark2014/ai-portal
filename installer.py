@@ -16,6 +16,7 @@
   python installer.py --registry-only       # Registry 만 생성
   python installer.py --notifications-only  # 승인 요청 메일 알림(SNS + EventBridge)만 구성
   python installer.py --harness-only        # MCP 테스트용 harness agent `ai_portal` 만 생성
+  python installer.py --gateway-only        # AgentCore Gateway `gw-ai-portal-us-west-2`·`gw-ai-portal-us-east-1` (+ target, interceptor Lambda) 만 생성
   python installer.py                       # 전체 설치
   python installer.py --skip-docker-build   # 인프라만 갱신(ECR 최신 이미지 재사용)
   python installer.py --image-only          # 이미지 빌드/푸시 후 서비스 재배포
@@ -337,7 +338,322 @@ def ensure_harness() -> Dict[str, str]:
     return info
 
 
-# ── 1d. 영구 저장소 (DynamoDB) ──────────────────────────────────────────
+# ── 1d. AgentCore Gateway (gw-<project>) + interceptor Lambda ─────────────
+def gateway_name(rgn: str) -> str:
+    return f"gw-{project_name}-{rgn}"                           # 리전이 이름에 보이도록: gw-ai-portal-us-west-2 / gw-ai-portal-us-east-1
+
+
+GATEWAY_NAME = gateway_name(region)                           # gw-ai-portal-us-west-2
+TARGET_NAME = f"target-{project_name}"                    # target-ai-portal
+INTERCEPTOR_FUNCTION = f"lambda-{project_name}-intercepter"   # lambda-ai-portal-intercepter (이름 철자는 요청대로)
+# IAM 역할은 전역이라 이름에 리전을 넣는다(리전마다 따로). us-west-2 의 기존 이름은 그대로다.
+def interceptor_role_name(rgn: str) -> str: return f"role-lambda-interceptor-for-{project_name}-{rgn}"
+def gateway_role_name(rgn: str) -> str: return f"role-gateway-for-{project_name}-{rgn}"
+# 두 번째 gateway: us-east-1 의 gw-ai-portal-us-east-1. 같은 방식(IAM 인증·interceptor)이고 target 은 web-search connector.
+WEBSEARCH_REGION = "us-east-1"
+WEBSEARCH_GATEWAY_NAME = gateway_name(WEBSEARCH_REGION)
+WEBSEARCH_TARGET_NAME = f"target-{project_name}-websearch"
+# 주의: gateway 이름은 UpdateGateway 로 바꿀 수 없다("Name cannot be updated"). 예전 이름(gw-ai-portal, gw-ai-portal-websearch)의
+# gateway 는 그대로 남으므로 필요 없으면 직접 지운다. 설치기는 새 이름으로 새로 만든다.
+# target 이 가리킬 MCP 서버. 기본값은 인증이 필요 없는 AWS Knowledge MCP 서버 — .env 의 TARGET_MCP_ENDPOINT 로 바꾼다.
+DEFAULT_TARGET_ENDPOINT = "https://knowledge-mcp.global.api.aws"
+
+
+def _package_lambda_zip(src: Path) -> bytes:
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(src, arcname="lambda_function.py")
+    return buf.getvalue()
+
+
+def _ensure_lambda_role(name: str, desc: str) -> str:
+    trust = {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Principal": {"Service": "lambda.amazonaws.com"},
+             "Action": "sts:AssumeRole"}]}
+    try:
+        arn = iam.get_role(RoleName=name)["Role"]["Arn"]
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "NoSuchEntity":
+            raise
+        arn = iam.create_role(RoleName=name, AssumeRolePolicyDocument=json.dumps(trust), Tags=TAGS, Description=desc)["Role"]["Arn"]
+        logger.info("Created role %s", name)
+        time.sleep(10)
+    iam.attach_role_policy(RoleName=name, PolicyArn="arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole")
+    return arn
+
+
+def ensure_interceptor_lambda(rgn: str = region) -> str:
+    """Gateway 로 오가는 MCP 요청·응답을 관찰하는 Lambda(gateway 와 같은 리전에 둔다). 권한은 CloudWatch Logs 쓰기뿐이다."""
+    lam = session.client("lambda", region_name=rgn)
+    logger.info("[1d] Interceptor Lambda %s (%s)", INTERCEPTOR_FUNCTION, rgn)
+    role = _ensure_lambda_role(interceptor_role_name(rgn), f"{project_name} gateway interceptor")
+    zipped = _package_lambda_zip(ROOT / "lambda-interceptor" / "lambda_function.py")
+    cfg = {"Timeout": 30, "MemorySize": 128}                  # gateway 호출 경로에 있다. 콜드스타트(boto3 로딩+조회)가 몇 초 걸려 여유를 둔다
+    cc = load_config()
+    pool_id, pool_region = cc.get("cognito_user_pool_id", ""), cc.get("cognito_region", COGNITO_REGION)
+    if pool_id:     # 인터셉터는 토큰의 사용자를 포털의 사용 승인 기록(DynamoDB)에서 요청마다 확인한다(Cognito 는 sub→이메일 조회에만 쓴다)
+        cfg["Environment"] = {"Variables": {"COGNITO_USER_POOL_ID": pool_id, "COGNITO_REGION": pool_region,
+                                            "DDB_TABLE": DDB_TABLE, "DDB_REGION": region}}
+        iam.put_role_policy(RoleName=interceptor_role_name(rgn), PolicyName="read-approvals", PolicyDocument=json.dumps({
+            "Version": "2012-10-17", "Statement": [
+                {"Sid": "ResolveUserEmail", "Effect": "Allow", "Action": ["cognito-idp:AdminGetUser"],
+                 "Resource": [f"arn:aws:cognito-idp:{pool_region}:{account_id}:userpool/{pool_id}"]},
+                {"Sid": "ReadUsageApprovals", "Effect": "Allow", "Action": ["dynamodb:GetItem", "dynamodb:Query"],
+                 "Resource": [f"arn:aws:dynamodb:{region}:{account_id}:table/{DDB_TABLE}"]}]}))
+        try:                                                   # 예전 정책(그룹 조회)은 쓰지 않는다
+            iam.delete_role_policy(RoleName=interceptor_role_name(rgn), PolicyName="read-cognito-groups")
+        except ClientError:
+            pass
+    try:
+        lam.get_function(FunctionName=INTERCEPTOR_FUNCTION)
+        lam.update_function_code(FunctionName=INTERCEPTOR_FUNCTION, ZipFile=zipped)
+        lam.get_waiter("function_updated").wait(FunctionName=INTERCEPTOR_FUNCTION)
+        lam.update_function_configuration(FunctionName=INTERCEPTOR_FUNCTION, Role=role, **cfg)
+    except lam.exceptions.ResourceNotFoundException:
+        for attempt in range(6):                                # 새 역할 전파 대기
+            try:
+                lam.create_function(FunctionName=INTERCEPTOR_FUNCTION, Runtime="python3.12", Role=role, Handler="lambda_function.handler",
+                                    Code={"ZipFile": zipped}, Tags={"Project": project_name}, **cfg)
+                break
+            except ClientError as e:
+                if e.response["Error"]["Code"] == "InvalidParameterValueException" and attempt < 5:
+                    time.sleep(8)
+                    continue
+                raise
+    lam.get_waiter("function_active_v2").wait(FunctionName=INTERCEPTOR_FUNCTION)
+    return lam.get_function(FunctionName=INTERCEPTOR_FUNCTION)["Configuration"]["FunctionArn"]
+
+
+def ensure_gateway_role(interceptor_arn: str, rgn: str = region, gw_name: str = GATEWAY_NAME, websearch: bool = False) -> str:
+    """Gateway 서비스 역할. 인터셉터 Lambda 를 호출할 수 있는 권한만 준다(IAM 인증 + MCP server target 이라 그 외는 필요 없다)."""
+    trust = {"Version": "2012-10-17", "Statement": [{"Sid": "AllowAgentCoreAssumeGateway", "Effect": "Allow",
+             "Principal": {"Service": "bedrock-agentcore.amazonaws.com"}, "Action": "sts:AssumeRole",
+             "Condition": {"StringEquals": {"aws:SourceAccount": account_id}}}]}
+    try:
+        arn = iam.get_role(RoleName=gateway_role_name(rgn))["Role"]["Arn"]
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "NoSuchEntity":
+            raise
+        arn = iam.create_role(RoleName=gateway_role_name(rgn), AssumeRolePolicyDocument=json.dumps(trust), Tags=TAGS,
+                              Description=f"Service role of gateway {gw_name}")["Role"]["Arn"]
+        logger.info("Created role %s", gateway_role_name(rgn))
+    stmts = [{"Sid": "InvokeInterceptor", "Effect": "Allow", "Action": "lambda:InvokeFunction", "Resource": [interceptor_arn]}]
+    if websearch:                                  # web-search connector target 이 쓰는 AWS 관리형 도구
+        stmts.append({"Sid": "InvokeWebSearchTool", "Effect": "Allow", "Action": ["bedrock-agentcore:InvokeWebSearch"],
+                      "Resource": [f"arn:aws:bedrock-agentcore:{rgn}:aws:tool/web-search.v1"]})
+    iam.put_role_policy(RoleName=gateway_role_name(rgn), PolicyName="gateway-permissions", PolicyDocument=json.dumps({
+        "Version": "2012-10-17", "Statement": stmts}))
+    try:                                           # 예전 이름의 정책은 정리
+        iam.delete_role_policy(RoleName=gateway_role_name(rgn), PolicyName="invoke-interceptor")
+    except ClientError:
+        pass
+    time.sleep(10)  # IAM 전파
+    return arn
+
+
+def find_gateway(name: str = GATEWAY_NAME, client: Any = None) -> Optional[Dict[str, Any]]:
+    client = client or agentcore
+    token = None
+    while True:
+        r = client.list_gateways(**({"nextToken": token} if token else {}))
+        for g in r.get("items", []):
+            if g["name"] == name:
+                return g
+        token = r.get("nextToken")
+        if not token:
+            return None
+
+
+def gateway_params(role_arn: str, interceptor_arn: str, name: str = GATEWAY_NAME,
+                   jwt: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """create_gateway 인자. MCP 프로토콜, REQUEST·RESPONSE 양쪽에 같은 인터셉터.
+
+    인증: 기본은 IAM(SigV4). jwt={"discovery_url", "client_id"} 를 주면 CUSTOM_JWT — Cognito(Google federation)가 발급한 토큰을
+    Cognito 의 discovery URL 로 검증하고, 토큰의 client_id 가 앱 클라이언트와 일치하는 요청만 통과시킨다(액세스 토큰에는 `aud` 가 없고
+    `client_id` 클레임이 있어 allowedClients 로 검사한다). 호출자는 IAM 주체가 아니라 Cognito 사용자이므로 인터셉터가 토큰의
+    클레임으로 사용자를 알아볼 수 있다."""
+    auth = ({"authorizerType": "CUSTOM_JWT",
+             "authorizerConfiguration": {"customJWTAuthorizer": {"discoveryUrl": jwt["discovery_url"], "allowedClients": [jwt["client_id"]]}}}
+            if jwt else {"authorizerType": "AWS_IAM"})
+    return dict(
+        name=name, description=f"{name} MCP gateway ({'Cognito JWT' if jwt else 'IAM'} auth, monitored by interceptor)",
+        roleArn=role_arn, protocolType="MCP", **auth,
+        interceptorConfigurations=[{
+            "interceptor": {"lambda": {"arn": interceptor_arn}},
+            "interceptionPoints": ["REQUEST", "RESPONSE"],
+            # JWT gateway 는 인터셉터가 Authorization 헤더의 토큰(그룹)으로 서버별 사용 승인을 검사해야 하므로 헤더를 넘긴다.
+            # IAM gateway 는 넘기지 않는다(SigV4 서명이 인터셉터로 가지 않게 하고, 호출자는 context.identity 로 안다).
+            "inputConfiguration": {"passRequestHeaders": bool(jwt)},
+        }],
+        tags={"Project": project_name})
+
+
+def target_params(gateway_id: str, endpoint: str, name: str = TARGET_NAME) -> Dict[str, Any]:
+    """create_gateway_target 인자. MCP server target(인증 없음). 인증이 필요한 서버는 credentialProviderConfigurations 를 추가한다."""
+    return dict(
+        gatewayIdentifier=gateway_id, name=name, description=f"{name} MCP target",
+        targetConfiguration={"mcp": {"mcpServer": {"endpoint": endpoint}}})
+
+
+def websearch_target_params(gateway_id: str, name: str = WEBSEARCH_TARGET_NAME) -> Dict[str, Any]:
+    """create_gateway_target 인자. AWS 관리형 web-search connector(기존 gateway-websearch 와 같은 구성), gateway 서비스 역할로 호출."""
+    return dict(
+        gatewayIdentifier=gateway_id, name=name, description=f"{name} (AgentCore web search)",
+        targetConfiguration={"mcp": {"connector": {"source": {"connectorId": "web-search", "version": "1.1.0"},
+                                                   "configurations": [{"name": "WebSearch", "parameterValues": {}}]}}},
+        credentialProviderConfigurations=[{"credentialProviderType": "GATEWAY_IAM_ROLE"}])
+
+
+def _wait(get, ok="READY", what="") -> Dict[str, Any]:
+    for _ in range(60):
+        cur = get()
+        if cur["status"] == ok:
+            return cur
+        if cur["status"].endswith("FAILED"):
+            raise RuntimeError(f"{what} {cur['status']}: {cur.get('statusReasons') or cur.get('statusReason', '')}")
+        time.sleep(5)
+    raise TimeoutError(f"{what} did not become {ok}")
+
+
+def ensure_gateway(rgn: str = region, websearch: bool = False, cognito_jwt: bool = False) -> Dict[str, str]:
+    """`gw-<project>-<region>` + target + interceptor Lambda 를 rgn 에 만든다. 이미 있으면 재사용한다.
+
+    target: websearch=False → MCP server(`TARGET_MCP_ENDPOINT`), True → AWS web-search connector.
+    config.json 에는 us-west-2 는 `gateway_*`, 그 밖의 리전은 `gateway_<region>_*` 로 기록한다."""
+    gw_name = gateway_name(rgn)
+    jwt: Optional[Dict[str, Any]] = None
+    if cognito_jwt:                                  # Cognito 앱 클라이언트가 발급한 토큰만 허용
+        cg_info = ensure_cognito()
+        jwt = {"discovery_url": cg_info["cognito_discovery_url"], "client_id": cg_info["cognito_client_id"]}
+    target_name = WEBSEARCH_TARGET_NAME if websearch else TARGET_NAME
+    ac = session.client("bedrock-agentcore-control", region_name=rgn)
+    logger.info("[1d] AgentCore Gateway '%s' (target '%s') in %s", gw_name, target_name, rgn)
+    interceptor_arn = ensure_interceptor_lambda(rgn)
+    role = ensure_gateway_role(interceptor_arn, rgn, gw_name, websearch)
+    gw = find_gateway(gw_name, ac)
+    if gw:
+        logger.warning("Gateway already exists: %s (%s)", gw["gatewayId"], gw["status"])
+        gid = gw["gatewayId"]
+    else:
+        for attempt in range(6):
+            try:
+                gid = ac.create_gateway(**gateway_params(role, interceptor_arn, gw_name, jwt))["gatewayId"]
+                break
+            except ClientError as e:
+                if e.response["Error"]["Code"] == "ValidationException" and attempt < 5:
+                    time.sleep(10)                     # 새 역할/권한이 아직 전파되지 않음
+                    continue
+                raise
+        logger.info("Created gateway: %s", gid)
+    cur = _wait(lambda: ac.get_gateway(gatewayIdentifier=gid), what="Gateway")
+    want = "CUSTOM_JWT" if cognito_jwt else "AWS_IAM"
+    if cur.get("authorizerType") != want:            # 인증 방식은 만든 뒤 바꾸지 않는다 → 지우고 다시 만들어야 한다
+        raise RuntimeError(f"{gw_name} 의 인증 방식이 {cur.get('authorizerType')} 입니다(기대: {want}). "
+                           f"gateway 와 target 을 삭제한 뒤 다시 실행하세요")
+
+    tgt = next((t for t in ac.list_gateway_targets(gatewayIdentifier=gid).get("items", []) if t["name"] == target_name), None)
+    if tgt:
+        logger.warning("Target already exists: %s (%s)", tgt["targetId"], tgt["status"])
+        tid = tgt["targetId"]
+    elif websearch:
+        tid = ac.create_gateway_target(**websearch_target_params(gid, target_name))["targetId"]
+        logger.info("Created target: %s (web-search connector)", tid)
+    else:
+        endpoint = read_env_file("TARGET_MCP_ENDPOINT") or DEFAULT_TARGET_ENDPOINT
+        if not endpoint.startswith("https://"):
+            raise ValueError(f"TARGET_MCP_ENDPOINT 는 https:// 로 시작해야 합니다: {endpoint!r}")
+        tid = ac.create_gateway_target(**target_params(gid, endpoint, target_name))["targetId"]
+        logger.info("Created target: %s → %s", tid, endpoint)
+    _wait(lambda: ac.get_gateway_target(gatewayIdentifier=gid, targetId=tid), what="Gateway target")
+
+    p = "gateway" if rgn == region else f"gateway_{rgn.replace('-', '_')}"
+    info = {f"{p}_id": gid, f"{p}_arn": cur["gatewayArn"], f"{p}_url": cur.get("gatewayUrl", ""), f"{p}_region": rgn,
+            f"{p}_name": gw_name, f"{p}_target_id": tid, f"{p}_interceptor_lambda_arn": interceptor_arn}
+    if p == "gateway":                                 # 기존 키 유지
+        info["interceptor_lambda"] = INTERCEPTOR_FUNCTION
+        info["interceptor_lambda_arn"] = interceptor_arn
+    save_config(**info)
+    logger.info("✓ Gateway READY: %s", info[f"{p}_url"])
+    return info
+
+
+def ensure_gateways() -> None:
+    """gw-ai-portal-us-west-2 (IAM 인증, MCP server target) 와 gw-ai-portal-us-east-1 (Cognito JWT 인증, web-search target)."""
+    ensure_gateway(region)
+    ensure_gateway(WEBSEARCH_REGION, websearch=True, cognito_jwt=True)
+
+
+# ── 1d-2. Cognito (Gateway JWT 인증의 IdP) ──────────────────────────────────
+# 사용자가 포털에 Google 로그인하면 Cognito 사용자(federated)로 등록되고, Cognito 가 JWT 를 발급한다.
+# Gateway(CUSTOM_JWT)는 Cognito 의 discovery URL 로 토큰을 검증한다. 액세스 토큰은 최대 24시간이라 만료 없는 JWT 는 없고,
+# 대신 리프레시 토큰(최대 10년)으로 새 액세스 토큰을 받는다.
+COGNITO_REGION = WEBSEARCH_REGION                          # gateway 와 같은 리전(us-east-1)
+COGNITO_POOL_NAME = f"{project_name}-users"
+COGNITO_CLIENT_NAME = f"{project_name}-mcp-client"
+ACCESS_TOKEN_HOURS = 24                                    # 액세스 토큰 최대(86400초)
+REFRESH_TOKEN_DAYS = 3650                                  # 리프레시 토큰 최대(315360000초 ≈ 10년)
+
+
+def cognito_pool_params() -> Dict[str, Any]:
+    """사용자 풀. 로그인은 이메일, 가입은 관리자(포털)만 — 셀프 가입을 막는다."""
+    return dict(PoolName=COGNITO_POOL_NAME, UsernameAttributes=["email"], AutoVerifiedAttributes=["email"],
+                AdminCreateUserConfig={"AllowAdminCreateUserOnly": True},
+                Schema=[{"Name": "email", "AttributeDataType": "String", "Required": True, "Mutable": True}],
+                UserPoolTags={"Project": project_name})
+
+
+def cognito_client_params(pool_id: str) -> Dict[str, Any]:
+    """앱 클라이언트(시크릿 없음). 사용자는 Google 이 아니라 **포털이** 신원을 확인한 뒤 Cognito 에 만들고(AdminCreateUser),
+    토큰도 포털(서버)이 관리자 인증(AdminInitiateAuth)으로 발급한다. 갱신은 리프레시 토큰으로 한다.
+    토큰 수명은 Cognito 가 허용하는 최대: 액세스 24시간, 리프레시 약 10년."""
+    return dict(
+        UserPoolId=pool_id, ClientName=COGNITO_CLIENT_NAME, GenerateSecret=False,
+        AccessTokenValidity=ACCESS_TOKEN_HOURS, IdTokenValidity=ACCESS_TOKEN_HOURS, RefreshTokenValidity=REFRESH_TOKEN_DAYS,
+        TokenValidityUnits={"AccessToken": "hours", "IdToken": "hours", "RefreshToken": "days"},
+        ExplicitAuthFlows=["ALLOW_REFRESH_TOKEN_AUTH", "ALLOW_ADMIN_USER_PASSWORD_AUTH"],
+        EnableTokenRevocation=True,                      # 승인 취소 시 리프레시 토큰을 폐기할 수 있다
+        PreventUserExistenceErrors="ENABLED")
+
+
+def ensure_cognito() -> Dict[str, str]:
+    """사용자 풀 + 도메인 + 앱 클라이언트. 이미 있으면 재사용한다(앱 클라이언트 설정은 코드와 맞춘다).
+    Google federation 은 쓰지 않는다 — 로그인 신원 확인은 포털이 Google 로 하고, Cognito 는 사용자·그룹·토큰만 맡는다."""
+    cg = session.client("cognito-idp", region_name=COGNITO_REGION)
+    logger.info("[1d-2] Cognito user pool '%s' in %s", COGNITO_POOL_NAME, COGNITO_REGION)
+    pool = next((p for p in cg.list_user_pools(MaxResults=60)["UserPools"] if p["Name"] == COGNITO_POOL_NAME), None)
+    if pool:
+        pool_id = pool["Id"]
+        logger.warning("User pool exists: %s", pool_id)
+    else:
+        pool_id = cg.create_user_pool(**cognito_pool_params())["UserPool"]["Id"]
+        logger.info("Created user pool: %s", pool_id)
+    try:
+        cg.delete_identity_provider(UserPoolId=pool_id, ProviderName="Google")      # 예전 federation 설정 정리
+        logger.info("Removed Google identity provider (federation 미사용)")
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ResourceNotFoundException":
+            raise
+    cl = next((c for c in cg.list_user_pool_clients(UserPoolId=pool_id, MaxResults=60)["UserPoolClients"]
+               if c["ClientName"] == COGNITO_CLIENT_NAME), None)
+    if cl:
+        client_id = cl["ClientId"]
+        params = cognito_client_params(pool_id); params.pop("GenerateSecret"); params["ClientId"] = client_id
+        params["SupportedIdentityProviders"] = ["COGNITO"]; params["AllowedOAuthFlowsUserPoolClient"] = False
+        params["CallbackURLs"] = []; params["LogoutURLs"] = []; params["AllowedOAuthFlows"] = []; params["AllowedOAuthScopes"] = []
+        cg.update_user_pool_client(**params)
+        logger.warning("App client exists: %s (설정 갱신)", client_id)
+    else:
+        client_id = cg.create_user_pool_client(**cognito_client_params(pool_id))["UserPoolClient"]["ClientId"]
+        logger.info("Created app client: %s", client_id)
+    info = {"cognito_user_pool_id": pool_id, "cognito_client_id": client_id, "cognito_region": COGNITO_REGION,
+            "cognito_discovery_url": f"https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{pool_id}/.well-known/openid-configuration"}
+    save_config(**info)
+    logger.info("✓ Cognito ready: %s", info["cognito_discovery_url"])
+    return info
+
+
+# ── 1e. 영구 저장소 (DynamoDB) ──────────────────────────────────────────
 DDB_TABLE = project_name                    # 테이블 이름 = 프로젝트 이름
 
 
@@ -420,6 +736,12 @@ def ensure_role(name: str, managed: Optional[List[str]] = None) -> str:
     return arn
 
 
+def cognito_pool_arn() -> str:
+    """task role 이 접근할 Cognito 사용자 풀의 ARN. 풀이 아직 없으면(Cognito 미설치) 어떤 풀과도 일치하지 않는 값으로 둔다."""
+    pool_id = load_config().get("cognito_user_pool_id", "")
+    return f"arn:aws:cognito-idp:{COGNITO_REGION}:{account_id}:userpool/{pool_id or 'not-installed'}"
+
+
 def create_ecs_roles(secret_arns: List[str]) -> Dict[str, str]:
     logger.info("[3/8] IAM roles")
     exe = ensure_role(f"role-ecs-execution-for-{project_name}-{region}",
@@ -455,6 +777,12 @@ def create_ecs_roles(secret_arns: List[str]) -> Dict[str, str]:
             # 영구 저장소: 이 테이블 하나만. Scan 은 통계·검색을 서버에서 집계하기 위한 것(데이터가 작다)
             {"Sid": "PortalTable", "Effect": "Allow", "Resource": [f"arn:aws:dynamodb:{region}:{account_id}:table/{DDB_TABLE}"],
              "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:Scan"]},
+            # MCP 접속 토큰: 로그인한 사용자를 Cognito 에 만들고, 서버(gateway)별 사용 승인 그룹을 관리하고, 토큰을 발급한다.
+            # 이 사용자 풀 하나로만 제한한다(다른 풀은 건드리지 못한다).
+            {"Sid": "McpTokenCognito", "Effect": "Allow", "Resource": [cognito_pool_arn()],
+             "Action": ["cognito-idp:AdminCreateUser", "cognito-idp:AdminGetUser", "cognito-idp:AdminSetUserPassword",
+                        "cognito-idp:AdminInitiateAuth", "cognito-idp:AdminAddUserToGroup", "cognito-idp:AdminRemoveUserFromGroup",
+                        "cognito-idp:AdminUserGlobalSignOut", "cognito-idp:CreateGroup", "cognito-idp:GetGroup"]},
             {"Sid": "RegistryRecords", "Effect": "Allow", "Resource": "*", "Action": [
                 "bedrock-agentcore:CreateRegistry", "bedrock-agentcore:CreateRegistryRecord",
                 "bedrock-agentcore:GetRegistryRecord", "bedrock-agentcore:ListRegistryRecords",
@@ -673,6 +1001,10 @@ def deploy_ecs(net: Dict[str, Any], alb: Dict[str, str], roles: Dict[str, str], 
         "REGISTRY_ID": load_config().get("registry_id", ""),
         "HARNESS_ARN": load_config().get("harness_arn", ""),
         "GATEWAY_REGIONS": read_env_file("GATEWAY_REGIONS"),
+        # MCP 접속 토큰(Cognito). config.json 은 이미지에 없으므로 환경 변수로 전달한다
+        "COGNITO_USER_POOL_ID": load_config().get("cognito_user_pool_id", ""),
+        "COGNITO_CLIENT_ID": load_config().get("cognito_client_id", ""),
+        "COGNITO_REGION": load_config().get("cognito_region", ""),
     }
     if not env["GOOGLE_CLIENT_ID"]:
         raise RuntimeError("GOOGLE_CLIENT_ID 가 .env 에 없습니다")
@@ -855,6 +1187,7 @@ def main() -> None:
     ap.add_argument("--notifications-only", action="store_true", help="승인 요청 메일 알림만 구성하고 종료")
     ap.add_argument("--table-only", action="store_true", help="DynamoDB 저장소 테이블만 만들고 종료")
     ap.add_argument("--harness-only", action="store_true", help="MCP 테스트용 harness agent 만 생성하고 종료")
+    ap.add_argument("--gateway-only", action="store_true", help="AgentCore Gateway(+target, interceptor Lambda)만 생성하고 종료")
     ap.add_argument("--domain-only", action="store_true", help="커스텀 도메인(인증서·CloudFront 별칭·DNS)만 설정하고 종료")
     ap.add_argument("--auto-approval", action="store_true", help="Registry auto-approval 켜기(기본: 꺼짐)")
     ap.add_argument("--skip-docker-build", action="store_true", help="ECR 의 최신 이미지를 재사용")
@@ -868,6 +1201,9 @@ def main() -> None:
         return
     if args.harness_only:
         ensure_harness()
+        return
+    if args.gateway_only:
+        ensure_gateways()
         return
     if args.domain_only:
         cfg = load_config()
@@ -884,6 +1220,7 @@ def main() -> None:
         return
 
     ensure_harness()
+    ensure_gateways()
     ensure_table()
     secret_arn = ensure_session_secret()
     gateway_secret_arn = ensure_gateway_secret()

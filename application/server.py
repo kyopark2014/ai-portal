@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import admins, agent_test, approvals, auth, catalog, chat, db, mcp_test, usage
+from . import admins, agent_test, approvals, auth, catalog, chat, db, mcp_test, mcp_token, usage
 
 DIST = Path(__file__).resolve().parent / "web" / "dist"
 _docs = os.environ.get("ENABLE_API_DOCS") == "1"
@@ -83,6 +83,10 @@ def login_google(body: GoogleLogin, request: Request, response: Response):
         db.record_login(email, claims.get("name") or "")
     except Exception:  # noqa: BLE001
         pass
+    try:    # MCP 접속용 Cognito 사용자도 만든다(신원은 위의 Google 검증). 실패해도 로그인은 막지 않는다.
+        mcp_token.ensure_user(email)
+    except Exception:  # noqa: BLE001
+        pass
     catalog.start_sync()  # 최초 로그인 시 AWS 정보를 백그라운드로 갱신
     return _user_json(auth.read_session(cookie))
 
@@ -112,6 +116,7 @@ app.include_router(approvals.router)
 app.include_router(approvals.admins_router)
 app.include_router(approvals.reviewers_router)
 app.include_router(usage.router)
+app.include_router(mcp_token.router)
 app.include_router(approvals.dashboard_router)
 
 

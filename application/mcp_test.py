@@ -39,13 +39,22 @@ def harness_arn() -> str:
     return os.environ.get("HARNESS_ARN") or catalog.config_value("harness_arn")
 
 
-def tool_for(item: dict) -> dict:
-    """MCP 항목 → InvokeHarness tools 항목."""
+def tool_for(item: dict, bearer: str | None = None) -> dict:
+    """MCP 항목 → InvokeHarness tools 항목.
+
+    JWT(Cognito) 인증 Gateway 는 harness 의 IAM 서명으로 부를 수 없으므로, 포털이 이 사용자의 액세스 토큰을 발급해(bearer)
+    `Authorization: Bearer` 헤더를 붙인 remote MCP 로 연결한다. 토큰은 호출마다 새로 만들고 저장·로그하지 않는다."""
     d = item["data"]
     name = _TOOLNAME.sub("_", item["name"])[:40] or "mcp"
+    if d.get("kind") == "gateway" and d.get("authorizer") == "CUSTOM_JWT":
+        if not bearer:
+            raise HTTPException(422, "JWT 인증 Gateway 를 테스트하려면 접속 토큰이 필요합니다")
+        if not d.get("endpoint"):
+            raise HTTPException(422, "endpoint 가 없습니다")
+        return {"type": "remote_mcp", "name": name, "config": {"remoteMcp": {"url": d["endpoint"], "headers": {"Authorization": f"Bearer {bearer}"}}}}
     if d.get("kind") == "gateway":
         if d.get("authorizer") != "AWS_IAM":
-            raise HTTPException(422, f"{d.get('authorizer')} 인증 Gateway 는 테스트할 수 없습니다 (AWS_IAM 만 지원)")
+            raise HTTPException(422, f"{d.get('authorizer')} 인증 Gateway 는 테스트할 수 없습니다 (AWS_IAM, CUSTOM_JWT 만 지원)")
         gid = d["gateway_id"]
         reg = d.get("region") or aws.region()
         arn = f"arn:aws:bedrock-agentcore:{reg}:{aws.account_id()}:gateway/{gid}"
@@ -229,8 +238,14 @@ def _prepare(item_id: int, kind: str, body: McpChatIn, user: auth.User) -> tuple
 @router.post("/mcp/{item_id}/chat")
 def chat(item_id: int, body: McpChatIn, user: auth.User = Depends(auth.current_user)):
     it, arn, history = _prepare(item_id, "mcp", body, user)
+    bearer = None
+    if (it["data"] or {}).get("kind") == "gateway" and it["data"].get("authorizer") == "CUSTOM_JWT":
+        from . import mcp_token
+        gid = it["data"].get("gateway_id", "")
+        mcp_token.grant(user.email, gid)                              # 사용 승인된 사람(또는 소유자)만 여기까지 온다 → 그룹을 맞춘다
+        bearer = mcp_token.issue(user.email)["access_token"]          # 이 요청에만 쓸 토큰(저장·로그하지 않는다)
     return _stream_harness(arn, user, body.session_id, history, system=catalog.harness_system_prompt(user, body.prompt_id),
-                           tools=[tool_for(it)])
+                           tools=[tool_for(it, bearer)])
 
 
 @router.post("/skills/{item_id}/chat")

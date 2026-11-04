@@ -25,7 +25,7 @@ export default function McpTest({ item }: { item: Item }) {
   const d = item.data;
   const isAgent = item.kind === "agent";
   const isSkill = item.kind === "skill";
-  const unsupported = !isAgent && d.kind === "gateway" && d.authorizer !== "AWS_IAM";
+  const unsupported = !isAgent && d.kind === "gateway" && d.authorizer !== "AWS_IAM" && d.authorizer !== "CUSTOM_JWT";
   const [ready, setReady] = useState<boolean | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState("");
@@ -68,7 +68,7 @@ export default function McpTest({ item }: { item: Item }) {
     setStatus(""); setBusy(false); abort.current = null;
   }
 
-  if (unsupported) return <p className="hint">{d.authorizer} 인증 Gateway는 테스트할 수 없습니다 (AWS_IAM Gateway와 직접 등록한 MCP만 지원).</p>;
+  if (unsupported) return <p className="hint">{d.authorizer} 인증 Gateway는 테스트할 수 없습니다 (AWS_IAM·CUSTOM_JWT Gateway와 직접 등록한 MCP만 지원).</p>;
   if (ready === false) return <p className="hint">테스트용 harness agent가 없습니다. <code>python installer.py --harness-only</code>로 만든 뒤 서버를 재시작하세요.</p>;
 
   return (

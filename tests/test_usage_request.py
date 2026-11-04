@@ -58,12 +58,22 @@ def test_using_the_mcp_is_blocked_until_approved(env, monkeypatch):
     assert client(USER).post(f"/api/mcp/{i}/test").status_code != 403                           # 승인 후에는 통과(여기서는 네트워크 오류 등 다른 결과)
 
 
-def test_owner_and_admin_never_need_to_apply_and_cannot(env):
+def test_owner_never_needs_to_apply_and_cannot(env):
     i = mcp()
-    for who in (OWNER, ADMIN):
-        s = client(who).get(f"/api/mcp/{i}/usage").json()
-        assert s["can_use"] is True and s["can_request"] is False and s["status"] == "OWNER"
-        assert client(who).post(f"/api/mcp/{i}/usage").status_code == 409
+    s = client(OWNER).get(f"/api/mcp/{i}/usage").json()
+    assert s["can_use"] is True and s["can_request"] is False and s["status"] == "OWNER"
+    assert client(OWNER).post(f"/api/mcp/{i}/usage").status_code == 409
+
+
+def test_admin_applies_and_cancels_like_anyone_else(env):
+    i = mcp()
+    s = client(ADMIN).get(f"/api/mcp/{i}/usage").json()
+    assert s["can_use"] is False and s["can_request"] is True and s["status"] == "NONE"
+    client(ADMIN).post(f"/api/mcp/{i}/usage")
+    client(ADMIN).post(f"/api/usage-requests/{i}/{ADMIN}/decision", json={"decision": "APPROVED"})
+    assert client(ADMIN).get(f"/api/mcp/{i}/usage").json()["can_use"] is True
+    r = client(ADMIN).delete(f"/api/mcp/{i}/usage")                       # 관리자도 사용 승인을 취소할 수 있다
+    assert r.status_code == 200 and r.json()["status"] == "NONE" and r.json()["can_use"] is False
 
 
 def test_non_mcp_items_have_no_usage_request_and_stay_open(env):
@@ -144,7 +154,64 @@ def test_cancel_usage_removes_approval_without_consent(env):
 def test_card_shows_usable_only_when_the_viewer_may_use_it(env):
     i = mcp()
     def usable(c): return next(x for x in c.get("/api/catalog/mcp").json()["items"] if x["id"] == i).get("usable")
-    assert usable(client(USER)) is False and usable(client(OWNER)) is True and usable(client(ADMIN)) is True
+    assert usable(client(USER)) is False and usable(client(OWNER)) is True and usable(client(ADMIN)) is False
     client(USER).post(f"/api/mcp/{i}/usage"); assert usable(client(USER)) is False
     client(ADMIN).post(f"/api/usage-requests/{i}/{USER}/decision", json={"decision": "APPROVED"}); assert usable(client(USER)) is True
     client(USER).delete(f"/api/mcp/{i}/usage"); assert usable(client(USER)) is False
+
+
+def test_status_at_changes_only_when_the_status_changes(env):
+    import time
+    i = mcp(); it = db.get_item(i); t0 = it["status_changed_at"]
+    time.sleep(0.02)
+    db.update_item(i, description="x")                       # 동기화·설명 수정: 상태 시각 불변
+    db.update_item(i, registry_status="APPROVED")            # 같은 상태 재기록(새로고침): 불변
+    assert db.get_item(i)["status_changed_at"] == t0
+    view = client(OWNER).get("/api/catalog/mcp").json()["items"][0]
+    assert view["status_at"] == t0
+    db.update_item(i, registry_status="DEPRECATED")
+    assert db.get_item(i)["status_changed_at"] > t0
+
+
+def gw_item():
+    i = db.insert_item("mcp", "gw-x", "", OWNER, {"kind": "gateway", "gateway_id": "gw-x-111111", "endpoint": "https://e/mcp"})
+    db.update_item(i, registry_id="REG", registry_record_id="rec123456", registry_status="APPROVED"); return i
+
+
+def approved_users(i): return db.get_item(i)["data"].get("approved_users")
+
+
+def test_approved_users_are_recorded_on_the_mcp_item_per_user(env):
+    i = gw_item()
+    client(USER).post(f"/api/mcp/{i}/usage")
+    assert approved_users(i) in (None, [])                                          # 신청만으로는 승인자가 아니다
+    client(ADMIN).post(f"/api/usage-requests/{i}/{USER}/decision", json={"decision": "APPROVED"})
+    assert approved_users(i) == [USER]
+    client(ADMIN).post(f"/api/mcp/{i}/usage")                                       # 다른 사람(관리자)이 신청해도 USER 의 상태는 그대로
+    assert approved_users(i) == [USER] and db.get_usage_request(i, ADMIN)["status"] == "PENDING"
+    client(ADMIN).post(f"/api/usage-requests/{i}/{ADMIN}/decision", json={"decision": "APPROVED"})
+    assert approved_users(i) == sorted([USER, ADMIN])
+
+
+def test_rejection_and_cancel_remove_only_that_user_from_the_list(env):
+    i = gw_item()
+    for u in (USER, ADMIN):
+        client(u).post(f"/api/mcp/{i}/usage"); client(ADMIN).post(f"/api/usage-requests/{i}/{u}/decision", json={"decision": "APPROVED"})
+    assert client(USER).delete(f"/api/mcp/{i}/usage").status_code == 200
+    assert approved_users(i) == [ADMIN]
+    client(ADMIN).delete(f"/api/mcp/{i}/usage")
+    assert approved_users(i) == []
+
+
+def test_auto_review_also_records_the_approved_user(env, monkeypatch):
+    from application import policy
+    monkeypatch.setattr(policy, "get", lambda: {"auto_review": True, "changed_by": "t", "changed_at": 0})
+    i = gw_item(); client(USER).post(f"/api/mcp/{i}/usage")
+    assert approved_users(i) == [USER]
+
+
+def test_approved_users_are_hidden_from_non_admins(env):
+    i = gw_item(); client(USER).post(f"/api/mcp/{i}/usage")
+    client(ADMIN).post(f"/api/usage-requests/{i}/{USER}/decision", json={"decision": "APPROVED"})
+    pick = lambda c: next(x for x in c.get("/api/catalog/mcp").json()["items"] if x["id"] == i)["data"]
+    assert pick(client(ADMIN)).get("approved_users") == [USER] and "approved_users" not in pick(client(USER))

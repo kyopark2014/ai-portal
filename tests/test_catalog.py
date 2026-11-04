@@ -310,6 +310,7 @@ def test_gateway_listing_failure_keeps_existing_items(env, monkeypatch):
 def test_gateway_items_cannot_be_probed_with_header_test(env):
     iid = db.upsert_synced("mcp", "gateway:us-west-2:gw-1", "gw", "", {"kind": "gateway", "authorizer": "AWS_IAM", "endpoint": "https://x/mcp"})
     item = db.list_items("mcp")[0]
+    db.put_usage_request(item["id"], "e2npark@gmail.com", "PENDING"); db.put_usage_request(item["id"], "e2npark@gmail.com", "APPROVED", decided_by="t")     # 관리자도 사용 승인이 있어야 테스트할 수 있다
     r = client("e2npark@gmail.com").post(f"/api/mcp/{item['id']}/test")
     assert r.status_code == 422 and "SigV4" in r.json()["detail"]
 

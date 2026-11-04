@@ -48,14 +48,14 @@ export default function MyRecords({ onOpen, isAdmin = false }: { onOpen: (it: It
         </div>
         <div className="tablewrap">
           <table>
-            <thead><tr><th>종류</th><th>이름</th>{scope === "all" && <th>소유자</th>}<th>상태</th><th className="n">수정</th><th /></tr></thead>
+            <thead><tr><th>종류</th><th>이름</th>{scope === "all" && <th>소유자</th>}<th>상태</th><th className="n">상태 변경</th><th /></tr></thead>
             <tbody>{rows.map((i) => (
               <tr key={i.id}>
                 <td>{KIND[i.kind]}</td>
                 <td><strong>{i.name}</strong>{i.description && <div className="hint clip">{i.description}</div>}</td>
                 {scope === "all" && <td className="mono sm">{i.owner}</td>}
                 <td><span className={`badge st-${i.registry_status ?? ""}`}>{i.registry_status === "APPROVED" && i.usable ? "사용 가능" : LABEL[i.registry_status ?? "NOT_REGISTERED"] ?? i.registry_status}</span></td>
-                <td className="n">{ago(i.updated_at)}</td>
+                <td className="n">{ago(i.status_at ?? i.updated_at)}</td>
                 <td><button type="button" className="link" onClick={() => onOpen(i)}>Open</button></td>
               </tr>))}</tbody>
           </table>

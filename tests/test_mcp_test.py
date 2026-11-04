@@ -31,10 +31,19 @@ def test_gateway_becomes_agentcore_gateway_tool_with_region_arn(env):
     assert t["config"]["agentCoreGateway"]["gatewayArn"] == "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/gw-abc"
 
 
-def test_jwt_gateway_is_rejected(env):
+def test_jwt_gateway_needs_a_token_and_becomes_a_remote_mcp_with_bearer(env):
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as e:
-        mcp_test.tool_for(gw("CUSTOM_JWT"))
+        mcp_test.tool_for(gw("CUSTOM_JWT"))                                # 토큰 없이는 만들지 않는다
+    assert e.value.status_code == 422
+    t = mcp_test.tool_for(gw("CUSTOM_JWT"), bearer="TOK")
+    assert t["type"] == "remote_mcp" and t["config"]["remoteMcp"] == {"url": "https://x/mcp", "headers": {"Authorization": "Bearer TOK"}}
+
+
+def test_other_authorizers_are_still_rejected(env):
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as e:
+        mcp_test.tool_for(gw("CUSTOM_OTHER"), bearer="TOK")
     assert e.value.status_code == 422
 
 

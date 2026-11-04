@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS items (
   registry_record_id TEXT,
   registry_status TEXT,
   created_at REAL NOT NULL,
-  updated_at REAL NOT NULL
+  updated_at REAL NOT NULL,
+  status_changed_at REAL                   -- registry_status 가 실제로 바뀐 시각(동기화·새로고침으로는 안 바뀐다)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_items_ext ON items(kind, ext_id) WHERE ext_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_items_kind ON items(kind, updated_at DESC);
@@ -77,6 +78,8 @@ def conn() -> Iterator[sqlite3.Connection]:
             if path not in _ready:
                 c.execute("PRAGMA journal_mode=WAL")
                 c.executescript(SCHEMA)
+                if "status_changed_at" not in {r[1] for r in c.execute("PRAGMA table_info(items)")}:   # 기존 파일 보강
+                    c.execute("ALTER TABLE items ADD COLUMN status_changed_at REAL")
                 _ready.add(path)
     try:
         yield c
@@ -148,6 +151,10 @@ def update_item(item_id: int, **fields: Any) -> None:
     sets.append("updated_at=?")
     vals.append(time.time())
     with conn() as c:
+        if "registry_status" in fields:
+            cur = c.execute("SELECT registry_status FROM items WHERE id=?", (item_id,)).fetchone()
+            if cur is not None and (cur[0] or "") != (fields["registry_status"] or ""):
+                sets.append("status_changed_at=?"); vals.append(time.time())
         c.execute(f"UPDATE items SET {','.join(sets)} WHERE id=?", (*vals, item_id))
 
 

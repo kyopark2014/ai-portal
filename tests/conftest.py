@@ -27,6 +27,15 @@ def _isolate_ssm(monkeypatch):
     admins.reset_cache(); policy.reset_cache()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_cognito(monkeypatch):
+    """테스트는 실제 Cognito 를 절대 부르지 않는다(풀이 설정돼 있지 않은 것으로 본다). Cognito 테스트는 moto 로 따로 한다."""
+    for k in ("COGNITO_USER_POOL_ID", "COGNITO_CLIENT_ID"):
+        monkeypatch.delenv(k, raising=False)
+    from application import mcp_token
+    monkeypatch.setattr(mcp_token, "settings", lambda: {"pool": "", "client": "", "region": "us-east-1"})
+
+
 # ── 저장소: 테스트 기본은 SQLite(빠르고 AWS 불필요). 실제 DynamoDB 를 절대 건드리지 않는다.
 #    TEST_STORE=dynamodb pytest 로 전체 테스트를 DynamoDB(moto) 위에서 다시 돌릴 수 있다. ──
 import os

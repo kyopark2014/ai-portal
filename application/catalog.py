@@ -73,9 +73,14 @@ def _can_edit(user: auth.User, item: dict) -> bool:
 
 def _view(item: dict, user: auth.User) -> dict:
     out = {**item, "can_edit": _can_edit(user, item)}
+    # status_at: 카드에 보여줄 '상태가 바뀐 시각'. 동기화·새로고침으로 갱신되는 updated_at 은 쓰지 않는다.
+    out["status_at"] = item.get("status_changed_at") or item.get("created_at")
     if item["kind"] == "mcp" and item.get("registry_status") == "APPROVED":
         from . import usage                      # 순환 import 회피: usage 가 catalog 를 쓴다
-        out["usable"] = usage.can_use(item, user)   # 카드 배지 '사용 가능' 용
+        ok, since = usage.usable_since(item, user)
+        out["usable"] = ok                       # 카드 배지 '사용 가능' 용
+        if ok and since:
+            out["status_at"] = since             # 사용 신청이 승인된 시각
     return out
 
 
@@ -137,7 +142,10 @@ def _mask_headers(d: dict) -> dict:
 
 
 def _out(item: dict, user: auth.User) -> dict:
-    return {**_view(item, user), "data": _mask_headers(item["data"])}
+    d = _mask_headers(item["data"])
+    if user.role != "admin" and "approved_users" in d:
+        d = {k: v for k, v in d.items() if k != "approved_users"}        # 승인된 사용자 목록은 관리자에게만 보인다
+    return {**_view(item, user), "data": d}
 
 
 # ── 공용 목록 ──
