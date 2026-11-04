@@ -616,9 +616,39 @@ def cognito_client_params(pool_id: str) -> Dict[str, Any]:
         PreventUserExistenceErrors="ENABLED")
 
 
+MCP_CALLBACK_PORT = 8484
+
+
+def cognito_oauth_params() -> Dict[str, Any]:
+    """Claude Code 의 `claude mcp add --client-id ... --callback-port 8484` 브라우저 로그인(authorization code)용 OAuth 설정."""
+    return dict(SupportedIdentityProviders=["COGNITO", "Google"], AllowedOAuthFlowsUserPoolClient=True,
+                AllowedOAuthFlows=["code"], AllowedOAuthScopes=["openid", "email", "profile"],
+                CallbackURLs=[f"http://localhost:{MCP_CALLBACK_PORT}/callback"])
+
+
+def ensure_google_idp(cg: Any, pool_id: str) -> None:
+    """Cognito 에 Google 을 Identity Provider 로 둔다(Claude Code 의 브라우저 로그인용). 시크릿은 .env 에서만 읽고 로그에 남기지 않는다.
+    이메일을 매핑해야 Gateway 인터셉터가 토큰의 사용자를 이메일로 찾아 승인 목록과 맞춰 볼 수 있다."""
+    cid, secret = read_env_file("GOOGLE_CLIENT_ID"), read_env_file("GOOGLE_CLIENT_SECRET")
+    if not cid or not secret:
+        logger.warning("GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET 이 .env 에 없어 Google IdP 를 건너뜁니다")
+        return
+    params = dict(UserPoolId=pool_id, ProviderName="Google", ProviderDetails={
+        "client_id": cid, "client_secret": secret, "authorize_scopes": "openid email profile"},
+        AttributeMapping={"email": "email", "username": "sub"})
+    try:
+        cg.create_identity_provider(ProviderType="Google", **params)
+        logger.info("Created Google identity provider")
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "DuplicateProviderException":
+            raise
+        cg.update_identity_provider(**params)
+        logger.info("Google identity provider exists (설정 갱신)")
+
+
 def ensure_cognito() -> Dict[str, str]:
-    """사용자 풀 + 도메인 + 앱 클라이언트. 이미 있으면 재사용한다(앱 클라이언트 설정은 코드와 맞춘다).
-    Google federation 은 쓰지 않는다 — 로그인 신원 확인은 포털이 Google 로 하고, Cognito 는 사용자·그룹·토큰만 맡는다."""
+    """사용자 풀 + 도메인 + Google IdP + 앱 클라이언트. 이미 있으면 재사용한다(앱 클라이언트 설정은 코드와 맞춘다).
+    로그인은 Google federation 이다. 사용 승인은 Cognito 그룹이 아니라 포털이 MCP 항목에 기록한 승인자 목록(이메일)으로 판단한다."""
     cg = session.client("cognito-idp", region_name=COGNITO_REGION)
     logger.info("[1d-2] Cognito user pool '%s' in %s", COGNITO_POOL_NAME, COGNITO_REGION)
     pool = next((p for p in cg.list_user_pools(MaxResults=60)["UserPools"] if p["Name"] == COGNITO_POOL_NAME), None)
@@ -628,23 +658,17 @@ def ensure_cognito() -> Dict[str, str]:
     else:
         pool_id = cg.create_user_pool(**cognito_pool_params())["UserPool"]["Id"]
         logger.info("Created user pool: %s", pool_id)
-    try:
-        cg.delete_identity_provider(UserPoolId=pool_id, ProviderName="Google")      # 예전 federation 설정 정리
-        logger.info("Removed Google identity provider (federation 미사용)")
-    except ClientError as e:
-        if e.response["Error"]["Code"] != "ResourceNotFoundException":
-            raise
+    ensure_google_idp(cg, pool_id)
     cl = next((c for c in cg.list_user_pool_clients(UserPoolId=pool_id, MaxResults=60)["UserPoolClients"]
                if c["ClientName"] == COGNITO_CLIENT_NAME), None)
     if cl:
         client_id = cl["ClientId"]
         params = cognito_client_params(pool_id); params.pop("GenerateSecret"); params["ClientId"] = client_id
-        params["SupportedIdentityProviders"] = ["COGNITO"]; params["AllowedOAuthFlowsUserPoolClient"] = False
-        params["CallbackURLs"] = []; params["LogoutURLs"] = []; params["AllowedOAuthFlows"] = []; params["AllowedOAuthScopes"] = []
+        params.update(cognito_oauth_params())
         cg.update_user_pool_client(**params)
         logger.warning("App client exists: %s (설정 갱신)", client_id)
     else:
-        client_id = cg.create_user_pool_client(**cognito_client_params(pool_id))["UserPoolClient"]["ClientId"]
+        client_id = cg.create_user_pool_client(**cognito_client_params(pool_id), **cognito_oauth_params())["UserPoolClient"]["ClientId"]
         logger.info("Created app client: %s", client_id)
     info = {"cognito_user_pool_id": pool_id, "cognito_client_id": client_id, "cognito_region": COGNITO_REGION,
             "cognito_discovery_url": f"https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{pool_id}/.well-known/openid-configuration"}

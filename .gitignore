@@ -11,3 +11,6 @@ application/data/
 # 배포 후 installer.py 가 만드는 계정 고유 식별자(계정 ID·Registry·CloudFront 등). 공개 저장소에 올리지 않는다.
 application/config.json
 *.tsbuildinfo
+
+# Claude Code local settings
+.claude/settings.local.json
