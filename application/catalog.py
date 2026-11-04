@@ -14,7 +14,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from . import admins, auth, aws, db
+from . import admins, auth, aws, db, policy
 
 log = logging.getLogger("catalog")
 router = APIRouter(prefix="/api")
@@ -587,6 +587,33 @@ def _config_registry() -> str:
     return config_value("registry_id")
 
 
+class PolicyIn(BaseModel):
+    auto_approval: bool | None = None
+    auto_review: bool | None = None
+
+
+@router.get("/policy")
+def get_policy(user: auth.User = Depends(auth.current_user)):
+    p = policy.get()
+    return {"auto_approval": p["auto_approval"], "auto_review": p["auto_review"],
+            **({"changed_by": p["changed_by"], "changed_at": p["changed_at"]} if user.role == "admin" else {})}
+
+
+@router.put("/policy")
+def put_policy(body: PolicyIn, user: auth.User = Depends(auth.current_user)):
+    """승인 자동화 스위치 변경(관리자만). 승인 절차를 줄이는 설정이라 누가 바꿨는지 기록한다."""
+    if user.role != "admin":
+        raise HTTPException(403, "관리자만 변경할 수 있습니다")
+    if body.auto_approval is None and body.auto_review is None:
+        raise HTTPException(422, "변경할 값이 없습니다")
+    try:
+        p = policy.set_(auto_approval=body.auto_approval, auto_review=body.auto_review, by=user.email)
+    except (ClientError, BotoCoreError) as e:
+        raise aws_err(e)
+    log.warning("approval policy changed by %s: auto_approval=%s auto_review=%s", user.email, p["auto_approval"], p["auto_review"])
+    return {"auto_approval": p["auto_approval"], "auto_review": p["auto_review"], "changed_by": p["changed_by"], "changed_at": p["changed_at"]}
+
+
 @router.get("/registry")
 def registry_info(user: auth.User = Depends(auth.current_user)):
     """이 포털이 쓰는 Registry(읽기 전용). 생성·변경 API 는 없다 — 설치기(installer.py)가 만든 `ai-portal` 하나로 고정이다."""
@@ -618,8 +645,80 @@ def _register_core(item_id: int) -> None:
         r = aws.create_record(rid, it)
     except (ClientError, BotoCoreError) as e:
         raise aws_err(e)
+    # 자동화 스레드는 이 함수가 끝난 뒤에 시작되므로(_created) 여기서의 기록과 겹치지 않는다.
     db.update_item(item_id, registry_id=rid, registry_record_id=aws.record_id_from_arn(r["recordArn"]),
                    registry_status=r.get("status", "CREATING"))
+
+
+def _sync_status(item_id: int) -> None:
+    """포털에 표시되는 상태를 AWS 의 **현재** 상태로 맞춘다.
+
+    자동화(Auto-approval 의 백그라운드 요청, Auto-review 의 승인)와 사람의 요청이 거의 동시에 상태를 쓰면,
+    먼저 읽은 옛 값이 나중에 기록되어 새 상태를 덮어쓸 수 있다(예: AWS 는 APPROVED 인데 화면은 PENDING).
+    그래서 값을 넘겨 쓰지 않고 쓰는 순간 AWS 에서 다시 읽는다.
+    """
+    it = db.get_item(item_id)
+    if not it or not it["registry_record_id"]:
+        return
+    try:
+        st = aws.registry_client().get_registry_record(
+            registryId=it["registry_id"], recordId=it["registry_record_id"])["status"]
+    except (ClientError, BotoCoreError):
+        return                                                   # 못 읽으면 건드리지 않는다(다음 동기화·상태 확인이 맞춘다)
+    if st != it["registry_status"]:
+        db.update_item(item_id, registry_status=st)
+
+
+def _auto_review(item_id: int) -> bool:
+    """Auto-review: 승인 요청이 접수된 record 를 reviewer/관리자의 허락 없이 바로 APPROVED 로 바꾼다.
+
+    사람이 한 승인과 감사 기록에서 구분되도록 사유에 `[auto-review]` 와 이 기능을 켠 관리자를 남긴다.
+    정책을 읽지 못하면 꺼진 것으로 본다. 처리에 실패하면 PENDING_APPROVAL 로 남겨 두어 사람이 승인할 수 있다. 성공하면 True.
+    """
+    pol = policy.get()
+    if not pol["auto_review"]:
+        return False
+    it = db.get_item(item_id)
+    if not it or not it["registry_record_id"]:
+        return False
+    try:
+        client = aws.registry_client()
+        cur = client.get_registry_record(registryId=it["registry_id"], recordId=it["registry_record_id"])["status"]
+        if cur != "PENDING_APPROVAL":                            # 다른 경로로 이미 처리됐거나 아직 요청 전
+            return False
+        reason = f"[auto-review] 자동 검토 (설정: {pol['changed_by'] or 'unknown'})"[:255]
+        client.update_registry_record_status(registryId=it["registry_id"], recordId=it["registry_record_id"],
+                                             status="APPROVED", statusReason=reason)
+    except (ClientError, BotoCoreError) as e:
+        log.warning("auto-review failed for item %s (left pending): %s", item_id, type(e).__name__)
+        return False
+    _forget_assignment(it["registry_record_id"])
+    _sync_status(item_id)
+    return True
+
+
+def _auto_submit(item_id: int) -> None:
+    """Auto-approval: 등록한 record 가 DRAFT 가 되기를 기다렸다가 승인 요청을 보낸다(CREATING 중에는 요청할 수 없다).
+    백그라운드 스레드에서 돌고, 실패해도 등록 자체에는 영향이 없다 — 사람이 상세 화면에서 직접 요청하면 된다."""
+    try:
+        for _ in range(30):
+            it = db.get_item(item_id)
+            if not it or not it["registry_record_id"]:
+                return                                           # 그 사이 삭제·취소됨
+            st = aws.registry_client().get_registry_record(
+                registryId=it["registry_id"], recordId=it["registry_record_id"])["status"]
+            if st == "DRAFT":
+                r = aws.registry_client().submit_registry_record_for_approval(
+                    registryId=it["registry_id"], recordId=it["registry_record_id"])
+                log.info("auto-approval: submitted %s", it["registry_record_id"])
+                if not _auto_review(item_id):                    # 이 스위치도 켜져 있으면 바로 승인까지(상태 기록 포함)
+                    _sync_status(item_id)
+                return
+            if st != "CREATING":
+                return                                           # 이미 요청됐거나 승인·거절 등 다른 상태
+            time.sleep(2)
+    except Exception as e:  # noqa: BLE001
+        log.warning("auto-approval submit failed for item %s: %s", item_id, type(e).__name__)
 
 
 def _created(item_id: int, user: auth.User) -> dict:
@@ -628,6 +727,9 @@ def _created(item_id: int, user: auth.User) -> dict:
     if selected_registry():
         try:
             _register_core(item_id)
+            if policy.get()["auto_approval"]:                    # 정책이 켜져 있을 때만 (읽지 못하면 꺼짐으로 본다)
+                threading.Thread(target=_auto_submit, args=(item_id,), daemon=True, name="auto-approval").start()
+                out["auto_approval"] = True
         except HTTPException as e:
             out["registry_error"] = str(e.detail)
     else:
@@ -674,8 +776,10 @@ def submit_registry(kind: Kind, item_id: int, user: auth.User = Depends(auth.cur
             registryId=it["registry_id"], recordId=it["registry_record_id"])
     except (ClientError, BotoCoreError) as e:
         raise aws_err(e)
-    db.update_item(item_id, registry_status=r.get("status", "PENDING_APPROVAL"))
-    return _out(db.get_item(item_id), user)
+    reviewed = _auto_review(item_id)
+    if not reviewed:
+        _sync_status(item_id)
+    return {**_out(db.get_item(item_id), user), "auto_reviewed": reviewed}
 
 
 @router.post("/catalog/{kind}/{item_id}/registry/cancel")

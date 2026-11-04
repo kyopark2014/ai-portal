@@ -172,3 +172,9 @@ td strong{font-weight:600}
 td .hint{margin:.1rem 0 0}
 .head{display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:.4rem}
 .head h2{margin:0}
+
+/* 승인 자동화 스위치 */
+.switches{display:grid;gap:.7rem;margin-top:.4rem}
+.switch{display:flex;gap:.7rem;align-items:flex-start;padding:.7rem .8rem;border:1px solid var(--line);border-radius:10px;background:var(--paper);cursor:pointer}
+.switch input{width:auto;margin-top:.25rem;accent-color:var(--teal)}
+.switch .hint{display:block;margin-top:.15rem}

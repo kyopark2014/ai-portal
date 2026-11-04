@@ -12,6 +12,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
+import threading
+_ready: set = set()
+_ready_lock = threading.Lock()
+
 KINDS = ("prompt", "mcp", "agent", "skill")
 
 SCHEMA = """
@@ -54,10 +58,15 @@ def db_path() -> Path:
 def conn() -> Iterator[sqlite3.Connection]:
     path = db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(path, timeout=10)
+    c = sqlite3.connect(path, timeout=30)
     c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")
-    c.executescript(SCHEMA)
+    c.execute("PRAGMA busy_timeout=30000")                 # 쓰기 잠금을 기다린다(동시 요청이 서로 '잠김' 오류를 내지 않게)
+    if path not in _ready:                                  # 스키마·WAL 설정은 파일마다 한 번만. 매 연결마다 하면 동시 요청이 서로 잠근다
+        with _ready_lock:
+            if path not in _ready:
+                c.execute("PRAGMA journal_mode=WAL")
+                c.executescript(SCHEMA)
+                _ready.add(path)
     try:
         yield c
         c.commit()

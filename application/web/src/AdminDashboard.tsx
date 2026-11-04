@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import * as api from "./api";
 import type { Dashboard, Kind } from "./api";
 import { ago } from "./Explore";
+import ConfirmDialog, { type ConfirmSpec } from "./ConfirmDialog";
 
 const KIND_LABEL: Record<string, string> = { prompt: "Prompt", mcp: "MCP", skill: "Skill", agent: "Agent" };
 const KINDS: Kind[] = ["prompt", "mcp", "skill", "agent"];
@@ -88,11 +89,29 @@ export default function AdminDashboard() {
   );
 }
 
-/** 이 포털이 쓰는 Registry(읽기 전용). 생성·변경 UI 는 두지 않는다 — 설치기가 만든 `ai-portal` 하나로 고정이다. */
+/** 이 포털이 쓰는 Registry(읽기 전용) + 승인 자동화 스위치. Registry 자체는 설치 때 정해진 하나로 고정이다. */
 function RegistryCard() {
   const [r, setR] = useState<api.RegistryInfo | null>(null);
-  const [err, setErr] = useState("");
-  useEffect(() => { api.registryInfo().then(setR).catch((e) => setErr(e.message)); }, []);
+  const [pol, setPol] = useState<api.Policy | null>(null);
+  const [err, setErr] = useState(""); const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [ask, setAsk] = useState<ConfirmSpec | null>(null);
+  useEffect(() => { api.registryInfo().then(setR).catch((e) => setErr(e.message)); api.getPolicy().then(setPol).catch((e) => setErr(e.message)); }, []);
+
+  async function change(patch: Partial<Pick<api.Policy, "auto_approval" | "auto_review">>, done: string) {
+    setBusy(true); setErr(""); setMsg("");
+    try { setPol(await api.setPolicy(patch)); setMsg(done); } catch (e: any) { setErr(e.message); }
+    setBusy(false);
+  }
+  // 끄는 것은 바로, 켜는 것은 확인을 거친다(승인 절차가 줄어드는 방향이므로)
+  const toggle = (key: "auto_approval" | "auto_review", label: string, risk: string) => (on: boolean) => {
+    if (!on) return change({ [key]: false }, `${label}을(를) 껐습니다.`);
+    setAsk({ title: `${label}을(를) 켤까요?`, lines: [risk, "켠 사람(" + "지금 로그인한 관리자" + ")이 기록에 남습니다.", "언제든 다시 끌 수 있습니다."],
+             confirmLabel: "켜기", danger: true, onConfirm: () => change({ [key]: true }, `${label}을(를) 켰습니다.`) });
+  };
+  const onApproval = toggle("auto_approval", "Auto-approval", "등록하면 승인 요청까지 자동으로 진행됩니다. (Auto-review 가 꺼져 있으면 reviewer 의 승인은 여전히 필요합니다.)");
+  const onReview = toggle("auto_review", "Auto-review", "승인 요청이 들어오면 reviewer·관리자의 허락 없이 바로 승인되어, 요청한 사람이 즉시 사용할 수 있게 됩니다. 검토 절차가 사실상 사라집니다.");
+
   return (
     <section className="card" aria-labelledby="ad-regmgr">
       <h2 id="ad-regmgr">연결된 Registry</h2>
@@ -103,10 +122,22 @@ function RegistryCard() {
           <div><dt>이름</dt><dd>{r.name}</dd></div>
           <div><dt>상태</dt><dd>{r.status}</dd></div>
           <div><dt>인증 방식</dt><dd>{r.authorizer === "AWS_IAM" ? "IAM" : r.authorizer}</dd></div>
-          <div><dt>Auto-approval</dt><dd>{r.auto_approval ? "켜짐" : "꺼짐 (수동 승인)"}</dd></div>
           <div className="wide-row"><dt>Registry ID</dt><dd className="mono sm arn">{r.registry_id}</dd></div>
         </dl>) : <p className="sub">연결된 Registry가 없습니다. <code>python installer.py</code> 로 만드세요.</p>)}
-      <p className="hint">이 포털은 설치 때 만든 Registry 하나만 사용합니다. 인증 방식과 auto-approval 은 Registry 생성 시 정해지며 여기서 바꾸지 않습니다.</p>
+      <p className="hint">이 포털은 설치 때 만든 Registry 하나만 사용합니다. 인증 방식은 Registry 생성 시 정해지며 여기서 바꾸지 않습니다.</p>
+
+      <h3>승인 자동화</h3>
+      {pol ? (<div className="switches">
+        <label className="switch"><input type="checkbox" role="switch" checked={pol.auto_approval} disabled={busy} onChange={(e) => onApproval(e.target.checked)} />
+          <span><strong>Auto-approval</strong> — Registry에 등록 시 자동 승인<span className="hint">등록하면 승인 요청까지 자동으로 보냅니다.</span></span></label>
+        <label className="switch"><input type="checkbox" role="switch" checked={pol.auto_review} disabled={busy} onChange={(e) => onReview(e.target.checked)} />
+          <span><strong>Auto-review</strong> — Registry 사용 신청시 자동 승인<span className="hint">사용 신청(승인 요청)이 오면 reviewer 허락 없이 바로 승인되어 요청자가 즉시 쓸 수 있습니다.</span></span></label>
+        {(pol.auto_approval || pol.auto_review) && <p className="note error" role="status">
+          {pol.auto_review ? "검토 없이 승인되는 상태입니다. " : ""}{pol.auto_approval && pol.auto_review ? "등록만 하면 곧바로 사용할 수 있습니다. " : ""}
+          {pol.changed_by && `(마지막 변경: ${pol.changed_by}${pol.changed_at ? ", " + new Date(pol.changed_at * 1000).toLocaleString("ko-KR", { hour12: false }) : ""})`}</p>}
+      </div>) : !err && <p className="sub">불러오는 중…</p>}
+      {msg && <p className="note ok" role="status">{msg}</p>}
+      {ask && <ConfirmDialog spec={ask} onClose={() => setAsk(null)} />}
     </section>
   );
 }

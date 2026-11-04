@@ -183,3 +183,8 @@ export const removeReviewer = (record_id: string, email: string) =>
   callErr<{ reviewers: string[] }>(`/api/reviewers?record_id=${encodeURIComponent(record_id)}&email=${encodeURIComponent(email)}`, json("DELETE"));
 
 export const registryInfo = () => callErr<RegistryInfo>("/api/registry");
+
+// ── 승인 자동화 정책 ──
+export interface Policy { auto_approval: boolean; auto_review: boolean; changed_by?: string; changed_at?: number }
+export const getPolicy = () => callErr<Policy>("/api/policy");
+export const setPolicy = (body: Partial<Pick<Policy, "auto_approval" | "auto_review">>) => callErr<Policy>("/api/policy", json("PUT", body));

@@ -446,10 +446,12 @@ def create_ecs_roles(secret_arns: List[str]) -> Dict[str, str]:
                 "bedrock-agentcore:InvokeAgentRuntimeForUser",
                 # Skill 테스트: harness 세션에 Node.js 설치
                 "bedrock-agentcore:InvokeAgentRuntimeCommand"]},
-            # 화면에서 추가한 관리자 목록과 record 별 reviewer 는 재배포로 사라지지 않도록 SSM Parameter Store 에 둔다
+            # 화면에서 추가한 관리자 목록, record 별 reviewer, 승인 자동화 정책(Auto-approval/Auto-review)은
+            # 재배포로 사라지지 않도록 SSM Parameter Store 에 둔다
             {"Sid": "ApproverStore", "Effect": "Allow", "Action": ["ssm:GetParameter", "ssm:PutParameter"],
              "Resource": [f"arn:aws:ssm:{region}:{account_id}:parameter/{project_name}/admins",
-                          f"arn:aws:ssm:{region}:{account_id}:parameter/{project_name}/reviewers"]},
+                          f"arn:aws:ssm:{region}:{account_id}:parameter/{project_name}/reviewers",
+                          f"arn:aws:ssm:{region}:{account_id}:parameter/{project_name}/policy"]},
             # 영구 저장소: 이 테이블 하나만. Scan 은 통계·검색을 서버에서 집계하기 위한 것(데이터가 작다)
             {"Sid": "PortalTable", "Effect": "Allow", "Resource": [f"arn:aws:dynamodb:{region}:{account_id}:table/{DDB_TABLE}"],
              "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:Scan"]},

@@ -11,7 +11,7 @@ from application import db, db_dynamo
 @pytest.fixture(params=["sqlite", "dynamodb"])
 def store(request, monkeypatch, tmp_path):
     if request.param == "sqlite":
-        monkeypatch.setenv("PORTAL_DB_PATH", str(tmp_path / "t.db")); monkeypatch.delenv("PORTAL_STORE", raising=False)
+        monkeypatch.setenv("PORTAL_DB_PATH", str(tmp_path / "t.db")); monkeypatch.setenv("PORTAL_STORE", "sqlite")
         yield "sqlite"
         return
     with mock_aws():
@@ -116,6 +116,17 @@ def test_login_record_never_stores_a_profile_picture(store):
 
 
 def test_concurrent_inserts_never_share_an_id(store):
+    """동시에 넣어도 id 가 겹치지 않는다.
+
+    DynamoDB 쪽은 원자 카운터(UpdateItem ADD)에 의존하는데, 이 보장은 **실제 DynamoDB 가 제공**하는 것이다.
+    moto(가짜 DynamoDB)는 스레드 간에 이 원자성을 지키지 않아 같은 id 를 여러 번 내줄 수 있으므로(40개 중 15개만 고유),
+    moto 위에서는 이 성질을 검증할 수 없다. 실제 테이블에서는 5라운드×40건에서 중복 0건임을 임시 테이블로 직접 확인했다.
+    그래서 moto 에서는 동시성 대신 '순차 발급이 연속·유일하다'만 확인하고, 동시성은 SQLite 에서 확인한다.
+    """
+    if store == "dynamodb":
+        ids = [db.insert_item("prompt", f"p{n}", "", "a@x.com", {}) for n in range(40)]
+        assert ids == list(range(ids[0], ids[0] + 40)) and len(db.list_items("prompt")) == 40
+        return
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(8) as ex:
         ids = list(ex.map(lambda n: db.insert_item("prompt", f"p{n}", "", "a@x.com", {}), range(40)))

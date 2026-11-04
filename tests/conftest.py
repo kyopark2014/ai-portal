@@ -7,7 +7,7 @@
 import pytest
 from botocore.exceptions import ClientError
 
-from application import admins
+from application import admins, policy
 
 
 class _NoAwsSSM:
@@ -21,21 +21,28 @@ class _NoAwsSSM:
 @pytest.fixture(autouse=True)
 def _isolate_ssm(monkeypatch):
     monkeypatch.setattr(admins, "_ssm", lambda: _NoAwsSSM())
-    admins.reset_cache()
+    monkeypatch.setattr(policy, "_ssm", lambda: _NoAwsSSM())           # 승인 자동화 정책도 기본은 '꺼짐'(저장소가 비어 있음)
+    admins.reset_cache(); policy.reset_cache()
     yield
-    admins.reset_cache()
+    admins.reset_cache(); policy.reset_cache()
 
 
-# ── 저장소 전환: PORTAL_STORE=dynamodb pytest 로 전체 테스트를 DynamoDB(moto) 위에서 다시 돌릴 수 있다 ──
+# ── 저장소: 테스트 기본은 SQLite(빠르고 AWS 불필요). 실제 DynamoDB 를 절대 건드리지 않는다.
+#    TEST_STORE=dynamodb pytest 로 전체 테스트를 DynamoDB(moto) 위에서 다시 돌릴 수 있다. ──
 import os
 
-if os.environ.get("PORTAL_STORE") == "dynamodb":
+if os.environ.get("TEST_STORE") != "dynamodb":
+    @pytest.fixture(autouse=True)
+    def _sqlite_store(monkeypatch):
+        monkeypatch.setenv("PORTAL_STORE", "sqlite")          # .env 의 dynamodb 설정이 새어 들어와도 실제 테이블을 쓰지 않는다
+else:
     import boto3
     from moto import mock_aws
 
     @pytest.fixture(autouse=True)
     def _fake_dynamodb(monkeypatch):
         from application import db_dynamo
+        monkeypatch.setenv("PORTAL_STORE", "dynamodb")
         with mock_aws():
             monkeypatch.setenv("AWS_ACCESS_KEY_ID", "x"); monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "x")
             monkeypatch.setenv("AWS_REGION", "us-west-2"); monkeypatch.setenv("DDB_TABLE", "ai-portal-test")

@@ -40,7 +40,7 @@ def test_login_is_recorded_with_email_and_name_only(env, monkeypatch):
     rows = db.recent_logins(10)                                                          # 저장소와 무관하게 공개 함수로 확인
     assert [r["email"] for r in rows] == ["foo@x.com", "foo@x.com"] and rows[0]["name"] == "Foo"
     assert set(rows[0]) == {"email", "name", "logged_at"} and "p/x.png" not in str(rows)   # 사진 URL 은 어디에도 없다
-    if os.environ.get("PORTAL_STORE") != "dynamodb":                                     # SQLite 는 테이블 스키마까지 확인
+    if os.environ.get("PORTAL_STORE") == "sqlite":                                     # SQLite 는 테이블 스키마까지 확인
         with db.conn() as k:
             assert [r[1] for r in k.execute("PRAGMA table_info(login_events)")] == ["id", "email", "name", "logged_at"]
 
