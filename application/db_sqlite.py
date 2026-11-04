@@ -280,6 +280,11 @@ def list_usage_requests(status: Optional[str] = None, item_id: Optional[int] = N
     return [_ur(r) for r in rows]
 
 
+def delete_usage_request(item_id: int, email: str) -> None:
+    with conn() as c:
+        c.execute("DELETE FROM usage_requests WHERE item_id=? AND email=?", (item_id, email))
+
+
 def delete_usage_requests(item_id: int) -> None:
     with conn() as c:
         c.execute("DELETE FROM usage_requests WHERE item_id=?", (item_id,))

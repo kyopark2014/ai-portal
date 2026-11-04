@@ -304,6 +304,10 @@ def list_usage_requests(status: Optional[str] = None, item_id: Optional[int] = N
     return sorted(rows, key=lambda x: x["requested_at"], reverse=True)
 
 
+def delete_usage_request(item_id: int, email: str) -> None:
+    table().delete_item(Key={"pk": f"USAGE#{int(item_id)}", "sk": email})
+
+
 def delete_usage_requests(item_id: int) -> None:
     for it in _query_all(f"USAGE#{int(item_id)}"):
         table().delete_item(Key={"pk": it["pk"], "sk": it["sk"]})

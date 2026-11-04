@@ -127,3 +127,24 @@ def test_deleting_the_mcp_removes_its_usage_requests(env, monkeypatch):
     i = mcp(); client(USER).post(f"/api/mcp/{i}/usage")
     assert client(ADMIN).delete(f"/api/catalog/mcp/{i}").status_code == 200
     assert db.list_usage_requests(item_id=i) == []
+
+
+def test_cancel_usage_removes_approval_without_consent(env):
+    i = mcp()
+    client(USER).post(f"/api/mcp/{i}/usage")
+    client(ADMIN).post(f"/api/usage-requests/{i}/{USER}/decision", json={"decision": "APPROVED"})
+    assert client(USER).get(f"/api/mcp/{i}/usage").json()["can_use"] is True
+    r = client(USER).delete(f"/api/mcp/{i}/usage")                       # 동의 없이 즉시 취소
+    assert r.status_code == 200 and r.json()["status"] == "NONE" and r.json()["can_use"] is False
+    assert client(USER).delete(f"/api/mcp/{i}/usage").status_code == 404
+    assert client(OWNER).delete(f"/api/mcp/{i}/usage").status_code == 409  # 소유자는 대상 아님
+    assert client(USER).post(f"/api/mcp/{i}/usage").json()["status"] == "PENDING"  # 다시 신청 가능
+
+
+def test_card_shows_usable_only_when_the_viewer_may_use_it(env):
+    i = mcp()
+    def usable(c): return next(x for x in c.get("/api/catalog/mcp").json()["items"] if x["id"] == i).get("usable")
+    assert usable(client(USER)) is False and usable(client(OWNER)) is True and usable(client(ADMIN)) is True
+    client(USER).post(f"/api/mcp/{i}/usage"); assert usable(client(USER)) is False
+    client(ADMIN).post(f"/api/usage-requests/{i}/{USER}/decision", json={"decision": "APPROVED"}); assert usable(client(USER)) is True
+    client(USER).delete(f"/api/mcp/{i}/usage"); assert usable(client(USER)) is False

@@ -182,3 +182,48 @@ td .hint{margin:.1rem 0 0}
 /* MCP 사용 신청 */
 .usage{border:1px solid var(--line);border-radius:10px;padding:.2rem .9rem .9rem;background:var(--paper)}
 .usage h3{margin-top:.7rem}
+
+/* 표(관리·사용 신청·내 레코드): 헤더/셀 정렬, 숫자는 오른쪽, 행 구분선 */
+.tablewrap{overflow-x:auto;margin:.4rem 0 .6rem}
+.tablewrap table{width:100%;border-collapse:collapse;font-size:.88rem}
+.tablewrap th{text-align:left;font-weight:600;color:var(--soft);font-size:.78rem;padding:.5rem .8rem;border-bottom:2px solid var(--line);white-space:nowrap}
+.tablewrap td{padding:.65rem .8rem;border-bottom:1px solid var(--line);vertical-align:top;text-align:left}
+.tablewrap tbody tr:last-child td{border-bottom:0}
+.tablewrap tbody tr:hover{background:rgba(15,110,106,.04)}
+.tablewrap th.n,.tablewrap td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.tablewrap td .badge.admin{margin-left:.45rem;vertical-align:middle}
+.tablewrap td.empty{text-align:center;color:var(--soft);padding:1.4rem}
+.tablewrap td .counts{min-width:7rem}
+
+.modal-head .head-acts{margin-left:auto;margin-right:.6rem}
+
+.tabs.sub-tabs{margin-top:-.2rem;font-size:.9em;opacity:.95}
+
+/* 카드/목록의 이름을 누르면 열린다 */
+.title-link{all:unset;cursor:pointer;display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.title-link:hover{text-decoration:underline}
+.title-link:focus-visible{outline:2px solid var(--teal);outline-offset:2px;border-radius:4px}
+
+.nw{white-space:nowrap}
+.tablewrap td .acts{display:flex;justify-content:flex-end}
+
+/* 등록 승인 표: 이름 칸은 절반 폭, 설명은 말줄임 */
+.reg-table td:first-child{width:26rem;max-width:26rem}
+.reg-table td:first-child .hint.clip{max-width:26rem}
+.reg-table th:nth-child(2),.reg-table td:nth-child(2){width:5rem;white-space:nowrap}
+
+/* 목록 보기: 제목 줄의 카드용 비대칭 여백을 없애 이름을 세로 중앙에 맞춘다 */
+.rows .item header{padding-top:0;padding-bottom:0}
+.rows .item .by{display:flex;align-items:center}
+.rows .item footer{align-items:center}
+
+/* 목록 보기 표 */
+.list-table{table-layout:auto}
+.list-table td.nm{display:flex;align-items:center;gap:.6rem;border-bottom:0;min-width:11rem}
+.list-table tr{border-bottom:1px solid var(--line)}.list-table tbody tr:last-child{border-bottom:0}
+.list-table td.nm .title-link{font-weight:600}
+.list-table td.ds{width:100%;max-width:0}
+.list-table .clip2{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.list-table td .badge{margin-left:.4rem}
+.list-table td:nth-child(5) .badge{margin-left:0}
+.list-table .acts{display:flex;gap:.8rem;justify-content:flex-end}

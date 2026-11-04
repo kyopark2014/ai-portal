@@ -4,16 +4,27 @@ import type { RecStatus, RegDetail, RegRecord } from "./api";
 import AdminManager from "./AdminManager";
 import UsageRequests from "./UsageRequests";
 
-const TABS: { s: RecStatus | "ADMINS" | "USAGE"; label: string }[] = [
-  { s: "PENDING_APPROVAL", label: "승인 대기" }, { s: "APPROVED", label: "승인됨" },
-  { s: "REJECTED", label: "거절됨" }, { s: "DEPRECATED", label: "Deprecated" }, { s: "USAGE", label: "사용 신청" }, { s: "ADMINS", label: "승인자 관리" },
+type Section = "REG" | "USAGE" | "ADMINS";
+const SECTIONS: { s: Section; label: string }[] = [
+  { s: "REG", label: "등록 승인" }, { s: "USAGE", label: "사용 승인" }, { s: "ADMINS", label: "승인자 관리" },
+];
+const TABS: { s: RecStatus; label: string }[] = [
+  { s: "PENDING_APPROVAL", label: "대기" }, { s: "APPROVED", label: "승인됨" },
+  { s: "REJECTED", label: "거절됨" }, { s: "DEPRECATED", label: "Deprecated" },
 ];
 const TYPE: Record<string, string> = { MCP: "MCP", A2A: "Agent", AGENT_SKILLS: "Skill", CUSTOM: "Prompt/Custom" };
 
+/** 목록용: 날짜와 시간(분까지)만. 예) 2026. 11. 4. 22:15 */
+function short(iso: string | null) {   // eslint-disable-line
+  if (!iso) return "-";
+  const d = new Date(iso), p = (n: number) => String(n).padStart(2, "0");
+  return <><span className="nw">{`${d.getFullYear()}. ${d.getMonth() + 1}. ${d.getDate()}.`}</span> <span className="nw">{`${p(d.getHours())}:${p(d.getMinutes())}`}</span></>;   // 좁으면 날짜 / 시간 두 줄
+}
 function when(iso: string | null) { return iso ? new Date(iso).toLocaleString("ko-KR", { hour12: false }) : "-"; }
 
 export default function Approvals({ openId, onOpened, isAdmin = false }: { openId: string | null; onOpened: () => void; isAdmin?: boolean }) {
-  const [tab, setTab] = useState<RecStatus | "ADMINS" | "USAGE">("PENDING_APPROVAL");
+  const [section, setSection] = useState<Section>(isAdmin ? "REG" : "USAGE");
+  const [tab, setTab] = useState<RecStatus>("PENDING_APPROVAL");
   const [rows, setRows] = useState<RegRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -21,10 +32,10 @@ export default function Approvals({ openId, onOpened, isAdmin = false }: { openI
 
   const load = useCallback(async () => {
     setLoading(true); setErr("");
-    if (tab === "ADMINS" || tab === "USAGE") { setLoading(false); return; }
+    if (section !== "REG") { setLoading(false); return; }
     try { setRows((await api.listApprovals(tab)).records); } catch (e: any) { setErr(e.message); }
     setLoading(false);
-  }, [tab]);
+  }, [tab, section]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { if (openId) { setSel(openId); onOpened(); } }, [openId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -32,25 +43,34 @@ export default function Approvals({ openId, onOpened, isAdmin = false }: { openI
     <section aria-labelledby="ap-h">
       <div className="page-head"><h1 id="ap-h">승인</h1>
         <button type="button" className="btn ghost" onClick={load} disabled={loading}>새로고침</button></div>
-      <p className="sub">Registry에 승인 요청된 record를 검토하고 승인·거절합니다. 승인은 검색에 노출될지를 정할 뿐, 런타임 접근 권한은 별도로 관리됩니다.</p>
-      <div className="tabs" role="tablist">
-        {TABS.filter((t) => isAdmin || t.s !== "ADMINS").map((t) => <button key={t.s} role="tab" aria-selected={tab === t.s} className={`tab ${tab === t.s ? "on" : ""}`} onClick={() => setTab(t.s)}>{t.label}</button>)}
+      <p className="sub"><b>등록 승인</b>(관리자 전용)은 Registry에 승인 요청된 record를, <b>사용 승인</b>은 등록된 MCP를 쓰겠다는 사용 신청을 검토합니다. reviewer 는 자기가 맡은 MCP 의 사용 신청만 보입니다(관리자는 전체).</p>
+      <div className="tabs" role="tablist" aria-label="승인 종류">
+        {SECTIONS.filter((t) => isAdmin || t.s === "USAGE").map((t) => <button key={t.s} role="tab" aria-selected={section === t.s} className={`tab ${section === t.s ? "on" : ""}`} onClick={() => setSection(t.s)}>{t.label}</button>)}
       </div>
       {err && <p className="note error" role="alert">{err}</p>}
-      {tab === "ADMINS" ? <AdminManager /> : tab === "USAGE" ? <UsageRequests /> : loading ? <p className="sub">불러오는 중…</p> : rows.length === 0 ? (
-        <div className="empty-box"><p>{tab === "PENDING_APPROVAL" ? "승인 대기 중인 요청이 없습니다." : "해당하는 record가 없습니다."}</p></div>
-      ) : (
-        <div className="rows">
-          {rows.map((r) => (
-            <article className="item" key={r.recordId}>
-              <header><span className="avatar-l" aria-hidden>{r.name[0]?.toUpperCase()}</span><h3 title={r.name}>{r.name}</h3></header>
-              <p className="by">{TYPE[r.descriptorType] ?? r.descriptorType}{r.portal ? ` · ${r.portal.owner.split("@")[0]}` : " · 포털 외 등록"}
-                {(r.reviewers?.length ?? 0) > 0 && <span className="badge" title={r.reviewers!.join(", ")}>reviewer {r.reviewers!.length}명</span>}</p>
-              <div className="preview"><p className="desc">{r.description || <em>설명 없음</em>}</p></div>
-              <footer><span>요청 {when(r.updatedAt)}</span>
-                <div className="acts"><button type="button" className="link" onClick={() => setSel(r.recordId)}>검토</button></div></footer>
-            </article>))}
-        </div>)}
+      {section === "ADMINS" ? <AdminManager /> : section === "USAGE" ? <UsageRequests /> : (
+        <section className="card" aria-labelledby="rg-h">
+          <h2 id="rg-h">등록 승인</h2>
+          <p className="sub">Registry에 승인 요청된 record입니다. 승인하면 Registry 에 등록되어 검색에 노출됩니다.</p>
+          <div className="tabs" role="tablist" aria-label="상태">
+            {TABS.map((t) => <button key={t.s} role="tab" aria-selected={tab === t.s} className={`tab ${tab === t.s ? "on" : ""}`} onClick={() => setTab(t.s)}>{t.label}</button>)}
+          </div>
+          {loading ? <p className="sub">불러오는 중…</p> : rows.length === 0 ? (
+            <div className="empty-box"><p>{tab === "PENDING_APPROVAL" ? "대기 중인 등록 요청이 없습니다." : "해당하는 record가 없습니다."}</p></div>
+          ) : (
+            <div className="tablewrap"><table className="reg-table">
+              <thead><tr><th>이름</th><th>종류</th><th>요청자</th><th>요청</th><th /></tr></thead>
+              <tbody>{rows.map((r) => (
+                <tr key={r.recordId}>
+                  <td><strong>{r.name}</strong>{r.description && <div className="hint clip" title={r.description}>{r.description}</div>}</td>
+                  <td>{TYPE[r.descriptorType] ?? r.descriptorType}</td>
+                  <td className="mono sm nw">{r.portal ? r.portal.owner : "포털 외 등록"}
+                    {(r.reviewers?.length ?? 0) > 0 && <span className="badge" title={r.reviewers!.join(", ")}>reviewer {r.reviewers!.length}명</span>}</td>
+                  <td>{short(r.updatedAt)}</td>
+                  <td className="nw"><div className="acts"><button type="button" className="btn nw" onClick={() => setSel(r.recordId)}>검토</button></div></td>
+                </tr>))}</tbody>
+            </table></div>)}
+        </section>)}
       {sel && <ReviewModal id={sel} onClose={() => setSel(null)} onDone={() => { setSel(null); load(); }} />}
     </section>
   );

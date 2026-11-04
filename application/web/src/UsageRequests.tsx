@@ -32,7 +32,7 @@ export default function UsageRequests() {
 
   return (
     <section className="card" aria-labelledby="ur-h">
-      <h2 id="ur-h">MCP 사용 신청</h2>
+      <h2 id="ur-h">MCP 사용 승인</h2>
       <p className="sub">등록된 MCP 를 쓰겠다는 신청입니다. 승인하면 신청한 사람이 그 MCP 를 테스트·연결할 수 있습니다.</p>
       <div className="tabs" role="tablist">{TABS.map((t) => (
         <button key={t.s} role="tab" aria-selected={tab === t.s} className={`tab ${tab === t.s ? "on" : ""}`} onClick={() => setTab(t.s)}>{t.label}</button>))}</div>

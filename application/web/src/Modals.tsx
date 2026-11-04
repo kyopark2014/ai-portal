@@ -7,7 +7,7 @@ import { statusText } from "./Explore";
 import PromptTest from "./PromptTest";
 import ReviewerPicker from "./ReviewerPicker";
 
-function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
+function Modal({ title, onClose, children, wide, actions }: { actions?: ReactNode; title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null;
@@ -19,7 +19,7 @@ function Modal({ title, onClose, children, wide }: { title: string; onClose: () 
   return (
     <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className={`modal ${wide ? "wide" : ""}`} role="dialog" aria-modal="true" aria-label={title} tabIndex={-1} ref={ref}>
-        <div className="modal-head"><h2>{title}</h2><button className="x" aria-label="닫기" onClick={onClose}>×</button></div>
+        <div className="modal-head"><h2>{title}</h2>{actions && <div className="head-acts">{actions}</div>}<button className="x" aria-label="닫기" onClick={onClose}>×</button></div>
         {children}
       </div>
     </div>
@@ -163,8 +163,21 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
     return () => { alive = false; clearTimeout(t); };
   }, [item.id, item.registry_record_id, item.registry_status]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const usageAction = item.kind === "mcp" && usage?.applicable && usage.status !== "OWNER" ? (
+    usage.status === "APPROVED" || usage.status === "PENDING" ? (
+      <button type="button" className="btn ghost" disabled={busy}
+        onClick={() => setAsk({ title: usage.status === "APPROVED" ? "사용을 취소할까요?" : "사용 신청을 취소할까요?",
+          lines: ["취소하면 reviewer 승인 없이 바로 적용되며, 다시 쓰려면 사용 신청을 새로 해야 합니다."], confirmLabel: "사용 취소", danger: true,
+          onConfirm: () => run(() => api.cancelUsage(item.id), (u) => { setUsage(u); setMsg("사용 신청을 취소 했습니다."); }) })}>
+        {usage.status === "APPROVED" ? "사용 취소" : "신청 취소"}</button>
+    ) : (
+      <button type="button" className="btn" disabled={busy || !usage.can_request}
+        title={usage.can_request ? "" : "등록이 완료된 MCP 에만 신청할 수 있습니다"}
+        onClick={() => run(() => api.requestUsage(item.id), (u) => { setUsage(u); setMsg(u.status === "APPROVED" ? "사용 신청이 바로 승인되었습니다." : "사용 신청을 보냈습니다. reviewer 가 승인하면 사용할 수 있습니다."); })}>사용 신청</button>
+    )) : undefined;
+
   return (
-    <Modal title={item.name} onClose={onClose} wide>
+    <Modal title={item.name} onClose={onClose} wide actions={usageAction}>
       <div className="detail">
         <p className="by">{item.kind.toUpperCase()} · By {item.owner}{item.source === "aws" && <span className="badge">AWS 동기화</span>}</p>
 
@@ -184,18 +197,13 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
           <PromptTest key={item.id + ":" + d.version + ":" + d.text.length} item={item} />
         </>)}
 
-        {item.kind === "mcp" && usage?.applicable && (
-          <div className="usage" role="region" aria-label="사용 신청">
-            <h3>사용 신청</h3>
-            {usage.status === "OWNER" ? <p className="hint">소유자·관리자는 신청 없이 사용할 수 있습니다.</p>
-              : usage.status === "APPROVED" ? <p className="note ok">사용이 승인되었습니다. 아래에서 테스트할 수 있습니다.</p>
+        {item.kind === "mcp" && usage?.applicable && usage.status !== "OWNER" && (
+          <div role="region" aria-label="사용 신청 상태">
+            {usage.status === "APPROVED" ? null
               : usage.status === "PENDING" ? <p className="note" role="status">사용 신청 중입니다. reviewer 가 승인하면 사용할 수 있습니다.</p>
               : (<>
                   {usage.status === "REJECTED" && <p className="note error" role="status">사용 신청이 거절되었습니다{usage.reason ? `: ${usage.reason}` : ""}. 다시 신청할 수 있습니다.</p>}
                   {!usage.registered && <p className="hint">등록이 완료된 후에 사용 신청할 수 있습니다.</p>}
-                  <div className="actions left"><button type="button" className="btn" disabled={busy || !usage.can_request}
-                    title={usage.can_request ? "" : "등록이 완료된 MCP 에만 신청할 수 있습니다"}
-                    onClick={() => run(() => api.requestUsage(item.id), (u) => { setUsage(u); setMsg(u.status === "APPROVED" ? "사용 신청이 바로 승인되었습니다." : "사용 신청을 보냈습니다. reviewer 가 승인하면 사용할 수 있습니다."); })}>사용 신청</button></div>
                 </>)}
           </div>)}
 
@@ -243,10 +251,18 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
 
         <h3>Agent Registry</h3>
         {item.registry_record_id ? (<div>
-          <p>Record <span className="mono sm">{item.registry_record_id}</span> <span className={`badge st-${item.registry_status}`}>{statusText(item.registry_status)}</span>
+          <p>Record <span className="mono sm">{item.registry_record_id}</span> <span className={`badge st-${item.registry_status}`}>{statusText(item.registry_status, item.kind === "mcp" ? usage?.can_use : undefined)}</span>
             {transient && <span className="hint"> 등록 처리 중… 완료되면 승인 요청 버튼이 나타납니다.</span>}</p>
           <div className="actions left">
-            <button className="btn ghost" disabled={busy} onClick={() => run(() => api.refreshRegistry(item.kind, item.id), (i) => { upd(i); setMsg(i.registry_reason ? `상태 사유: ${i.registry_reason}` : "상태를 갱신했습니다."); })}>상태 확인</button>
+            <button className="btn ghost" disabled={busy} onClick={() => run(() => api.refreshRegistry(item.kind, item.id), async (i) => {
+              upd(i);
+              if (i.kind === "mcp" && i.registry_status === "APPROVED") {      // MCP: 등록 + 사용 신청 상태를 한 문장으로
+                const u = await api.myUsage(i.id).catch(() => null); if (u) setUsage(u);
+                const st = u?.status;
+                setMsg(st === "APPROVED" || st === "OWNER" ? "등록과 사용신청이 완료되었습니다."
+                  : st === "PENDING" ? "등록후 사용신청 중입니다." : "등록되었지만 사용 신청은 되지 않았습니다.");
+              } else setMsg(i.registry_reason ? `상태 사유: ${i.registry_reason}` : "상태를 갱신했습니다.");
+            })}>상태 확인</button>
             {item.can_edit && item.registry_status === "PENDING_APPROVAL" && <button className="btn danger" disabled={busy}
               onClick={() => setAsk({
                 title: "승인 요청을 취소할까요?",

@@ -13,7 +13,8 @@ export const KINDS: { kind: Kind; label: string; icon: string; blurb: string }[]
 ];
 
 /** 카드 배지: Registry 상태를 사람이 읽는 말로. APPROVED 는 '등록'(등록 승인 완료)이다. */
-export function statusText(st: string | null): string {
+export function statusText(st: string | null, usable?: boolean): string {
+  if (st === "APPROVED" && usable) return "사용 가능";      // MCP: 등록 후 사용이 승인된(또는 소유자·관리자) 경우
   return ({ APPROVED: "등록", PENDING_APPROVAL: "승인 대기", DRAFT: "초안", REJECTED: "거절됨", DEPRECATED: "Deprecated", CREATING: "등록 중", UPDATING: "갱신 중" } as Record<string, string>)[st ?? ""] ?? (st ?? "");
 }
 
@@ -177,14 +178,15 @@ export default function Explore({ user }: { user: User }) {
           <p>{q || mine ? "조건에 맞는 항목이 없습니다." : `등록된 ${meta.label}이(가) 없습니다.`}</p>
         </div>
       ) : (
-        <div className={view === "grid" ? "cards" : "rows"}>
+      view === "grid" ? (
+        <div className="cards">
           {shown.map((it) => (
             <article className="item" key={it.id}>
               <header>
                 <span className={`avatar-l k-${it.kind}`} aria-hidden>{it.name[0]?.toUpperCase()}</span>
-                <h3 title={it.name}>{it.name}</h3>
-                {view === "grid" && <CardMenu name={it.name} canDelete={it.can_edit} onOpen={() => setOpen(it)} onDelete={() => onDelete(it)}
-                  onReviewer={isAdmin && it.registry_record_id ? () => setReviewerFor(it) : undefined} />}
+                <h3 title={it.name}><button type="button" className="title-link" onClick={() => setOpen(it)}>{it.name}</button></h3>
+                <CardMenu name={it.name} canDelete={it.can_edit} onOpen={() => setOpen(it)} onDelete={() => onDelete(it)}
+                  onReviewer={isAdmin && it.registry_record_id ? () => setReviewerFor(it) : undefined} />
               </header>
               <p className="by">By {it.owner.split("@")[0]}{it.source === "aws" && <span className="badge">AWS</span>}</p>
               <div className="preview">
@@ -193,18 +195,31 @@ export default function Explore({ user }: { user: User }) {
               </div>
               <footer>
                 <span>Modified {ago(it.updated_at)}</span>
-                {it.registry_status && <span className={`badge st-${it.registry_status}`}>{statusText(it.registry_status)}</span>}
-                {view === "list" && (
-                  <div className="acts">
-                    <button type="button" className="link" onClick={() => setOpen(it)}>Open</button>
-                    {isAdmin && it.registry_record_id && <button type="button" className="link" onClick={() => setReviewerFor(it)}>Add reviewer</button>}
-                    {it.can_edit && <button type="button" className="link del" onClick={() => onDelete(it)}>Delete</button>}
-                  </div>
-                )}
+                {it.registry_status && <span className={`badge st-${it.registry_status}`}>{statusText(it.registry_status, it.usable)}</span>}
               </footer>
             </article>
           ))}
         </div>
+        ) : (
+        <div className="tablewrap"><table className="list-table">
+          <thead><tr><th>이름</th><th>작성자</th><th>설명</th><th>수정</th><th>상태</th><th /></tr></thead>
+          <tbody>{shown.map((it) => (
+            <tr key={it.id}>
+              <td className="nm"><span className={`avatar-l k-${it.kind}`} aria-hidden>{it.name[0]?.toUpperCase()}</span>
+                <button type="button" className="title-link" title={it.name} onClick={() => setOpen(it)}>{it.name}</button></td>
+              <td className="nw">{it.owner.split("@")[0]}{it.source === "aws" && <span className="badge">AWS</span>}</td>
+              <td className="ds"><div className="clip2" title={it.description}>{it.description || <em>설명 없음</em>}</div>
+                <div className="hint mono sm clip">{subtitle(it)}</div></td>
+              <td className="nw">{ago(it.updated_at)}</td>
+              <td className="nw">{it.registry_status && <span className={`badge st-${it.registry_status}`}>{statusText(it.registry_status, it.usable)}</span>}</td>
+              <td className="nw"><div className="acts">
+                <button type="button" className="link" onClick={() => setOpen(it)}>Open</button>
+                {isAdmin && it.registry_record_id && <button type="button" className="link" onClick={() => setReviewerFor(it)}>Add reviewer</button>}
+                {it.can_edit && <button type="button" className="link del" onClick={() => onDelete(it)}>Delete</button>}
+              </div></td>
+            </tr>))}</tbody>
+        </table></div>
+        )
       )}
 
       {ask && <ConfirmDialog spec={ask} onClose={() => setAsk(null)} />}

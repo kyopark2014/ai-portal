@@ -16,7 +16,7 @@ from typing import Any
 KINDS = ("prompt", "mcp", "agent", "skill")
 _FUNCS = ("is_visible", "list_items", "list_owned", "get_item", "insert_item", "update_item", "delete_item", "upsert_synced",
           "prune_synced", "find_by_record", "get_setting", "set_setting", "record_login", "user_stats", "login_totals", "recent_logins",
-          "get_usage_request", "put_usage_request", "list_usage_requests", "delete_usage_requests")
+          "get_usage_request", "put_usage_request", "list_usage_requests", "delete_usage_requests", "delete_usage_request")
 
 
 def backend():

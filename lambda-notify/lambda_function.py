@@ -53,7 +53,7 @@ def handler(event, _ctx):
     admins, reviewers = recipients(rec)
     link = f"{BASE}/approvals/{urllib.parse.quote(rec)}"
     sent = 0
-    for role, group in (("admin", admins), ("reviewer", reviewers)):
+    for role, group in (("admin", admins),):          # 등록 승인은 관리자만 처리 → 메일도 관리자에게만
         for addr in group:                          # 한 명이 실패해도 나머지는 보낸다
             try:
                 SES.send_email(FromEmailAddress=SENDER, Destination={"ToAddresses": [addr]},

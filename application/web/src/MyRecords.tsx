@@ -54,7 +54,7 @@ export default function MyRecords({ onOpen, isAdmin = false }: { onOpen: (it: It
                 <td>{KIND[i.kind]}</td>
                 <td><strong>{i.name}</strong>{i.description && <div className="hint clip">{i.description}</div>}</td>
                 {scope === "all" && <td className="mono sm">{i.owner}</td>}
-                <td><span className={`badge st-${i.registry_status ?? ""}`}>{LABEL[i.registry_status ?? "NOT_REGISTERED"] ?? i.registry_status}</span></td>
+                <td><span className={`badge st-${i.registry_status ?? ""}`}>{i.registry_status === "APPROVED" && i.usable ? "사용 가능" : LABEL[i.registry_status ?? "NOT_REGISTERED"] ?? i.registry_status}</span></td>
                 <td className="n">{ago(i.updated_at)}</td>
                 <td><button type="button" className="link" onClick={() => onOpen(i)}>Open</button></td>
               </tr>))}</tbody>

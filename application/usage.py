@@ -48,6 +48,18 @@ def state_for(item: dict, user: auth.User) -> dict:
             "can_request": registered and (r is None or r["status"] == "REJECTED")}
 
 
+@router.delete("/mcp/{item_id}/usage")
+def cancel_usage(item_id: int, user: auth.User = Depends(auth.current_user)):
+    """사용 취소: 본인의 사용 신청/승인을 동의 없이 지운다(다시 신청하려면 새로 신청). 소유자·관리자는 대상이 아니다."""
+    it = _item(item_id, user)
+    if user.role == "admin" or it["owner"] == user.email:
+        raise HTTPException(409, "소유자와 관리자는 사용 취소 대상이 아닙니다")
+    if not db.get_usage_request(it["id"], user.email):
+        raise HTTPException(404, "사용 신청 내역이 없습니다")
+    db.delete_usage_request(it["id"], user.email)
+    return state_for(it, user)
+
+
 class DecisionIn(BaseModel):
     decision: Literal["APPROVED", "REJECTED"]
     reason: str = Field("", max_length=200)

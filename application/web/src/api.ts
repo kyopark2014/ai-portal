@@ -20,7 +20,7 @@ export const logout = () => call<{ ok: boolean }>("/api/auth/logout", { method: 
 export type Kind = "prompt" | "mcp" | "agent" | "skill";
 export interface Item {
   id: number; kind: Kind; name: string; description: string; owner: string; source: "portal" | "aws";
-  ext_id: string | null; data: Record<string, any>; desc_edited: boolean; can_edit: boolean;
+  ext_id: string | null; data: Record<string, any>; desc_edited: boolean; can_edit: boolean; usable?: boolean;
   registry_id: string | null; registry_record_id: string | null; registry_status: string | null;
   created_at: number; updated_at: number; registry_error?: string;
 }
@@ -200,6 +200,7 @@ export interface UsageRequest {
   mcp: { id: number; name: string; owner: string; description: string };
 }
 export const myUsage = (id: number) => callErr<UsageState>(`/api/mcp/${id}/usage`);
+export const cancelUsage = (id: number) => callErr<UsageState>(`/api/mcp/${id}/usage`, json("DELETE"));
 export const requestUsage = (id: number) => callErr<UsageState>(`/api/mcp/${id}/usage`, json("POST"));
 export const listUsageRequests = (status: "PENDING" | "APPROVED" | "REJECTED" = "PENDING") =>
   callErr<{ requests: UsageRequest[] }>(`/api/usage-requests?status=${status}`);

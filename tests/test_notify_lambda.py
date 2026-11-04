@@ -46,31 +46,24 @@ def ev(rec="rec123456"): return {"detail": {"registryRecordId": rec, "registryId
 def sent_to(ses): return sorted(t for t, _ in ses.sent)
 
 
-def test_admins_and_the_records_reviewers_are_notified(lam):
+def test_only_admins_are_notified_of_registration_requests(lam):
     m, ssm, ses = lam
     ssm.params = {"/ai-portal/admins": ["second@x.com"], "/ai-portal/reviewers": {"rec123456": ["Rev@X.com", "rev2@x.com"]}}
-    assert m.handler(ev(), None) == {"sent": 4}
-    assert sent_to(ses) == ["rev2@x.com", "rev@x.com", "root@x.com", "second@x.com"]               # 정규화, 관리자 + reviewer
-    body = dict(ses.sent)
-    assert "관리자" in body["root@x.com"] and "reviewer" in body["rev@x.com"]
+    assert m.handler(ev(), None) == {"sent": 2}
+    assert sent_to(ses) == ["root@x.com", "second@x.com"]               # 등록 승인은 관리자 전용 → reviewer 에게는 보내지 않는다
+    assert "관리자" in dict(ses.sent)["root@x.com"]
 
 
 def test_a_reviewer_is_not_told_about_other_records(lam):
     m, ssm, ses = lam
     ssm.params = {"/ai-portal/reviewers": {"OTHER9999": ["rev@x.com"]}}
     m.handler(ev("rec123456"), None)
-    assert sent_to(ses) == ["root@x.com"]                                                           # reviewer 는 자기 record 알림만
+    assert sent_to(ses) == ["root@x.com"]
 
 
 def test_no_reviewers_means_admins_only(lam):
     m, ssm, ses = lam
     assert m.handler(ev(), None) == {"sent": 1} and sent_to(ses) == ["root@x.com"]
-
-
-def test_someone_who_is_both_admin_and_reviewer_gets_one_mail(lam):
-    m, ssm, ses = lam
-    ssm.params = {"/ai-portal/admins": ["second@x.com"], "/ai-portal/reviewers": {"rec123456": ["second@x.com", "rev@x.com"]}}
-    assert m.handler(ev(), None) == {"sent": 3} and sent_to(ses).count("second@x.com") == 1
 
 
 def test_ssm_outage_notifies_seed_admins_only(lam):
@@ -81,7 +74,7 @@ def test_ssm_outage_notifies_seed_admins_only(lam):
 
 def test_one_failed_recipient_does_not_block_the_others(lam):
     m, ssm, ses = lam
-    ssm.params = {"/ai-portal/reviewers": {"rec123456": ["bad@x.com", "ok@x.com"]}}; ses.fail_for = {"bad@x.com"}
+    ssm.params = {"/ai-portal/admins": ["bad@x.com", "ok@x.com"]}; ses.fail_for = {"bad@x.com"}
     assert m.handler(ev(), None) == {"sent": 2}
     assert "bad@x.com" not in sent_to(ses) and "ok@x.com" in sent_to(ses)
 

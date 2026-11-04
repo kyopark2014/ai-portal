@@ -69,7 +69,7 @@ def _summary(r: dict) -> dict:
 
 @router.get("")
 def queue(status: Literal["PENDING_APPROVAL", "APPROVED", "REJECTED", "DEPRECATED", "DRAFT"] = "PENDING_APPROVAL",
-          user: auth.User = Depends(require_reviewer)):
+          user: auth.User = Depends(require_admin)):
     rid, out, token = _registry_id(), [], None
     try:
         while True:
@@ -89,7 +89,7 @@ def queue(status: Literal["PENDING_APPROVAL", "APPROVED", "REJECTED", "DEPRECATE
 
 
 @router.get("/{record_id}")
-def detail(record_id: str, user: auth.User = Depends(require_reviewer)):
+def detail(record_id: str, user: auth.User = Depends(require_admin)):
     rid = _registry_id()
     if not _visible_to(user, _record_id(record_id)):
         raise HTTPException(404, "not found")          # reviewer 가 아닌 record 는 존재 여부도 알리지 않는다
@@ -122,7 +122,7 @@ class DecisionIn(BaseModel):
 
 
 @router.post("/{record_id}/decision")
-def decide(record_id: str, body: DecisionIn, user: auth.User = Depends(require_reviewer)):
+def decide(record_id: str, body: DecisionIn, user: auth.User = Depends(require_admin)):
     rid, rec = _registry_id(), _record_id(record_id)
     if not _visible_to(user, rec):
         raise HTTPException(404, "not found")

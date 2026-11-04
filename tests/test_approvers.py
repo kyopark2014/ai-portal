@@ -96,31 +96,27 @@ def _pending_item(owner=USER, rec="rec123456"):
 REV = "reviewer@x.com"
 
 
-def test_admin_adds_a_reviewer_to_one_record_and_only_that_record(env):
-    _pending_item(rec="rec123456"); _pending_item(rec="rec777777")
+def test_admin_adds_a_reviewer_to_one_record(env):
+    _pending_item(rec="rec123456")
     r = client(ADMIN).post("/api/reviewers", json={"record_id": "rec123456", "email": " Reviewer@X.com "})
     assert r.status_code == 200 and r.json()["reviewers"] == [REV]                                   # 정규화
-    body = {"decision": "APPROVED", "reason": "ok"}
-    assert client(REV).post("/api/approvals/rec777777/decision", json=body).status_code == 404       # 지정되지 않은 record 는 존재도 안 보인다
+    assert client(REV).get("/api/me").json()["can_review"] is True                                    # 승인 메뉴(사용 승인)는 열린다
+
+
+def test_registration_approval_is_admin_only_even_for_reviewers(env):
+    _pending_item(rec="rec123456")
+    client(ADMIN).post("/api/reviewers", json={"record_id": "rec123456", "email": REV})
+    c = client(REV)
+    assert c.get("/api/approvals").status_code == 403 and c.get("/api/approvals/rec123456").status_code == 403
+    assert c.post("/api/approvals/rec123456/decision", json={"decision": "APPROVED"}).status_code == 403
     assert env[1].updates == []
-    assert client(REV).post("/api/approvals/rec123456/decision", json=body).status_code == 200
-    assert env[1].updates == [("rec123456", "APPROVED")]
+    assert client(USER).get("/api/approvals").status_code == 403
+    assert client(ADMIN).post("/api/approvals/rec123456/decision", json={"decision": "APPROVED"}).status_code == 200
 
 
 def test_admins_can_always_decide_regardless_of_reviewers(env):
     _pending_item(); client(ADMIN).post("/api/reviewers", json={"record_id": "rec123456", "email": REV})
     assert client(ADMIN).post("/api/approvals/rec123456/decision", json={"decision": "APPROVED"}).status_code == 200
-
-
-def test_reviewer_sees_only_their_records_and_non_reviewers_nothing(env):
-    _pending_item(rec="rec123456"); _pending_item(rec="rec777777")
-    client(ADMIN).post("/api/reviewers", json={"record_id": "rec123456", "email": REV})
-    assert client(USER).get("/api/approvals").status_code == 403                                      # 어느 record 의 reviewer 도 아님
-    ids = {r["recordId"] for r in client(REV).get("/api/approvals").json()["records"]}
-    assert ids == {"rec123456"} and client(REV).get("/api/approvals/rec777777").status_code == 404
-    rec = client(REV).get("/api/approvals").json()["records"][0]
-    assert rec["can_decide"] is True and rec["reviewers"] == [REV]
-    assert {r["recordId"] for r in client(ADMIN).get("/api/approvals").json()["records"]} == {"rec123456"}   # 관리자는 전부(여기선 조회 목록 1개)
 
 
 def test_reviewer_cannot_deprecate_or_manage_reviewers_or_admins(env):
@@ -148,16 +144,16 @@ def test_reviewer_rules_and_limits(env):
 def test_remove_reviewer_revokes_access_immediately(env):
     _pending_item(); a = client(ADMIN)
     a.post("/api/reviewers", json={"record_id": "rec123456", "email": REV})
-    assert client(REV).get("/api/approvals").status_code == 200
+    assert client(REV).get("/api/me").json()["can_review"] is True
     assert a.delete(f"/api/reviewers?record_id=rec123456&email={REV}").json()["reviewers"] == []
-    assert client(REV).get("/api/approvals").status_code == 403 and a.delete(f"/api/reviewers?record_id=rec123456&email={REV}").status_code == 422
+    assert client(REV).get("/api/me").json()["can_review"] is False and a.delete(f"/api/reviewers?record_id=rec123456&email={REV}").status_code == 422
 
 
-def test_ssm_outage_means_only_admins_can_decide(env):
+def test_ssm_outage_means_no_reviewer_menu(env):
     ssm, _ = env
     _pending_item(); client(ADMIN).post("/api/reviewers", json={"record_id": "rec123456", "email": REV}); admins.reset_cache()
     ssm.fail = "AccessDeniedException"
-    assert client(REV).get("/api/approvals").status_code == 403                                       # 확인 불가 → 권한 부여하지 않는다
+    assert client(REV).get("/api/me").json()["can_review"] is False                                   # 확인 불가 → 권한 부여하지 않는다
     assert client(ADMIN).get("/api/approvals").status_code == 200
 
 

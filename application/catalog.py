@@ -72,7 +72,11 @@ def _can_edit(user: auth.User, item: dict) -> bool:
 
 
 def _view(item: dict, user: auth.User) -> dict:
-    return {**item, "can_edit": _can_edit(user, item)}
+    out = {**item, "can_edit": _can_edit(user, item)}
+    if item["kind"] == "mcp" and item.get("registry_status") == "APPROVED":
+        from . import usage                      # 순환 import 회피: usage 가 catalog 를 쓴다
+        out["usable"] = usage.can_use(item, user)   # 카드 배지 '사용 가능' 용
+    return out
 
 
 # ── 요청 모델 ──
