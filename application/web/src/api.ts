@@ -199,11 +199,6 @@ export interface UsageRequest {
   decided_at: number | null; decided_by: string; reason: string;
   mcp: { id: number; name: string; owner: string; description: string };
 }
-export interface McpToken {
-  access_token: string; refresh_token: string; expires_in: number; token_type: string; client_id: string; region: string; group: string;
-}
-/** 승인된 사용자의 Gateway 접속 토큰(누를 때마다 새로 발급, 서버에 저장하지 않는다). */
-export const getMcpToken = (id: number) => callErr<McpToken>(`/api/mcp/${id}/token`);
 export const myUsage = (id: number) => callErr<UsageState>(`/api/mcp/${id}/usage`);
 export const cancelUsage = (id: number) => callErr<UsageState>(`/api/mcp/${id}/usage`, json("DELETE"));
 export const requestUsage = (id: number) => callErr<UsageState>(`/api/mcp/${id}/usage`, json("POST"));

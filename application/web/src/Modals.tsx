@@ -3,7 +3,6 @@ import * as api from "./api";
 import type { Item, Kind, RegistryInfo, User } from "./api";
 import ConfirmDialog, { type ConfirmSpec } from "./ConfirmDialog";
 import McpTest from "./McpTest";
-import McpTokenBox from "./McpToken";
 import { statusText } from "./Explore";
 import PromptTest from "./PromptTest";
 import ReviewerPicker from "./ReviewerPicker";
@@ -218,7 +217,6 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
             <div><dt>리전</dt><dd>{d.region}</dd></div>
             <div className="wide-row"><dt>MCP endpoint</dt><dd className="mono sm arn">{d.endpoint || "-"}</dd></div>
           </dl>
-          <McpTokenBox key={item.id} item={item} canUse={usage?.can_use ?? false} />
           {(usage?.can_use ?? true) && (<>
             <h3>테스트 <span className="hint">harness agent</span></h3>
             <McpTest key={item.id} item={item} /></>)}
