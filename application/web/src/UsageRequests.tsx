@@ -7,7 +7,7 @@ const TABS: { s: "PENDING" | "APPROVED" | "REJECTED"; label: string }[] = [
   { s: "PENDING", label: "대기" }, { s: "APPROVED", label: "승인됨" }, { s: "REJECTED", label: "거절됨" },
 ];
 
-/** MCP 사용 신청 처리. 관리자는 전부, reviewer 는 자기에게 지정된 MCP 의 신청만 보인다. */
+/** MCP·Agent 사용 신청 처리. 관리자는 전부, reviewer 는 자기에게 지정된 항목의 신청만 보인다. */
 export default function UsageRequests() {
   const [tab, setTab] = useState<"PENDING" | "APPROVED" | "REJECTED">("PENDING");
   const [rows, setRows] = useState<UsageRequest[]>([]);
@@ -32,15 +32,16 @@ export default function UsageRequests() {
 
   return (
     <section className="card" aria-labelledby="ur-h">
-      <h2 id="ur-h">MCP 사용 승인</h2>
-      <p className="sub">등록된 MCP 를 쓰겠다는 신청입니다. 승인하면 신청한 사람이 그 MCP 를 테스트·연결할 수 있습니다.</p>
+      <h2 id="ur-h">사용 승인</h2>
+      <p className="sub">등록된 MCP·Agent 를 쓰겠다는 신청입니다. 승인하면 신청한 사람이 그 항목을 테스트·연결할 수 있습니다.</p>
       <div className="tabs" role="tablist">{TABS.map((t) => (
         <button key={t.s} role="tab" aria-selected={tab === t.s} className={`tab ${tab === t.s ? "on" : ""}`} onClick={() => setTab(t.s)}>{t.label}</button>))}</div>
       {loading ? <p className="sub">불러오는 중…</p> : rows.length === 0 ? <div className="empty-box"><p>{tab === "PENDING" ? "대기 중인 사용 신청이 없습니다." : "해당하는 신청이 없습니다."}</p></div> : (
         <div className="tablewrap"><table>
-          <thead><tr><th>MCP</th><th>신청자</th><th>신청</th>{tab !== "PENDING" && <th>처리</th>}<th /></tr></thead>
+          <thead><tr><th>종류</th><th>이름</th><th>신청자</th><th>신청</th>{tab !== "PENDING" && <th>처리</th>}<th /></tr></thead>
           <tbody>{rows.map((r) => (
             <tr key={`${r.item_id}:${r.email}`}>
+              <td className="nw">{r.mcp.kind === "agent" ? "Agent" : "MCP"}</td>
               <td><strong>{r.mcp.name}</strong>{r.mcp.description && <div className="hint clip">{r.mcp.description}</div>}</td>
               <td className="mono sm">{r.email}</td>
               <td>{ago(r.requested_at)}</td>

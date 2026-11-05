@@ -215,3 +215,25 @@ def test_approved_users_are_hidden_from_non_admins(env):
     client(ADMIN).post(f"/api/usage-requests/{i}/{USER}/decision", json={"decision": "APPROVED"})
     pick = lambda c: next(x for x in c.get("/api/catalog/mcp").json()["items"] if x["id"] == i)["data"]
     assert pick(client(ADMIN)).get("approved_users") == [USER] and "approved_users" not in pick(client(USER))
+
+
+def agent(status="APPROVED", rec="agrec12345", owner=OWNER):
+    i = db.insert_item("agent", "ag", "", owner, {"agent_type": "harness", "arn": "arn:aws:bedrock-agentcore:us-west-2:123456789012:harness/ai_portal-XyZ789"})
+    db.update_item(i, registry_id="REG", registry_record_id=rec, registry_status=status); return i
+
+
+def test_agent_usage_request_flow_and_chat_gate(env, monkeypatch):
+    from application import agent_test
+    i = agent()
+    body = {"session_id": "s" * 36, "messages": [{"role": "user", "content": "hi"}]}
+    assert client(USER).get(f"/api/agent/{i}/usage").json()["can_request"] is True
+    assert client(USER).post(f"/api/agents/{i}/chat", json=body).status_code == 403              # 승인 전에는 대화 불가
+    assert client(USER).post(f"/api/agent/{i}/usage").json()["status"] == "PENDING"
+    assert client(USER).post(f"/api/mcp/{i}/usage").status_code == 404                           # 종류가 다르면 찾지 못한다
+    req = client(ADMIN).get("/api/usage-requests").json()["requests"][0]
+    assert req["email"] == USER and req["mcp"]["kind"] == "agent"
+    assert client(ADMIN).post(f"/api/usage-requests/{i}/{USER}/decision", json={"decision": "APPROVED"}).status_code == 200
+    monkeypatch.setattr(agent_test, "_harness_events", lambda *a, **k: iter([{"t": "ok"}]))
+    assert client(USER).post(f"/api/agents/{i}/chat", json=body).status_code == 200
+    assert client(OWNER).post(f"/api/agents/{i}/chat", json=body).status_code == 200            # 소유자는 신청 없이
+    assert client(USER).delete(f"/api/agent/{i}/usage").json()["status"] == "NONE"

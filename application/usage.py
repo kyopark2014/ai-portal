@@ -1,6 +1,6 @@
-"""MCP 사용 신청. Registry 의 승인은 'Registry 에 등록해도 되는가' 이고, 사용 신청은 '이 MCP 를 내가 써도 되는가' 이다.
+"""MCP·Agent 사용 신청. Registry 의 승인은 'Registry 에 등록해도 되는가' 이고, 사용 신청은 '이 항목을 내가 써도 되는가' 이다.
 
-  - 신청은 **등록이 끝난 MCP**(Registry 상태 APPROVED)에만 할 수 있다.
+  - 신청은 **등록이 끝난 MCP/Agent**(Registry 상태 APPROVED)에만 할 수 있다.
   - 승인은 관리자 또는 그 record 의 reviewer 가 한다(등록 승인과 같은 사람들).
   - 실제로 쓰는 동작(연결 테스트·harness 테스트)은 소유자와 승인을 받은 사람(관리자 포함)만 할 수 있다.
     목록과 상세는 등록된 MCP 라면 누구나 볼 수 있다.
@@ -18,11 +18,14 @@ from . import admins, auth, catalog, db, policy
 
 router = APIRouter(prefix="/api")
 REASON_MAX = 255
+USAGE_KINDS = ("mcp", "agent")                 # 사용 신청이 필요한 종류
+_LABEL = {"mcp": "MCP", "agent": "Agent"}
+UsageKind = Literal["mcp", "agent"]
 
 
 def usable_since(item: dict, user: auth.User) -> tuple[bool, float | None]:
     """(사용 가능 여부, 사용 가능해진 시각). 소유자는 시각 없음(등록 시각을 쓴다)."""
-    if item["kind"] != "mcp":
+    if item["kind"] not in USAGE_KINDS:
         return True, None
     if item["owner"] == user.email:
         return True, None
@@ -66,8 +69,8 @@ def sync_group(item: dict, email: str, approved: bool) -> str:
 
 
 def can_use(item: dict, user: auth.User) -> bool:
-    """이 사용자가 이 항목을 실제로 호출해도 되는가. MCP 만 사용 신청이 필요하고 나머지는 지금처럼 열려 있다."""
-    if item["kind"] != "mcp":
+    """이 사용자가 이 항목을 실제로 호출해도 되는가. MCP·Agent 만 사용 신청이 필요하고 나머지는 지금처럼 열려 있다."""
+    if item["kind"] not in USAGE_KINDS:
         return True
     if item["owner"] == user.email:
         return True
@@ -77,13 +80,13 @@ def can_use(item: dict, user: auth.User) -> bool:
 
 def require_use(item: dict, user: auth.User) -> None:
     if not can_use(item, user):
-        raise HTTPException(403, "이 MCP 를 사용하려면 사용 신청이 승인되어야 합니다")
+        raise HTTPException(403, f"이 {_LABEL.get(item['kind'], '항목')} 를 사용하려면 사용 신청이 승인되어야 합니다")
 
 
 def state_for(item: dict, user: auth.User) -> dict:
     """화면용: 이 사용자의 사용 상태. 등록이 끝나지 않았으면 신청할 수 없다."""
     registered = item["registry_status"] == "APPROVED"
-    if item["kind"] != "mcp":
+    if item["kind"] not in USAGE_KINDS:
         return {"applicable": False}
     base = {"applicable": True, "registered": registered, "can_use": can_use(item, user)}
     if item["owner"] == user.email:
@@ -93,10 +96,10 @@ def state_for(item: dict, user: auth.User) -> dict:
             "can_request": registered and (r is None or r["status"] == "REJECTED")}
 
 
-@router.delete("/mcp/{item_id}/usage")
-def cancel_usage(item_id: int, user: auth.User = Depends(auth.current_user)):
+@router.delete("/{kind}/{item_id}/usage")
+def cancel_usage(kind: UsageKind, item_id: int, user: auth.User = Depends(auth.current_user)):
     """사용 취소: 본인의 사용 신청/승인을 동의 없이 지운다(다시 신청하려면 새로 신청). 소유자만 대상이 아니다(관리자도 취소할 수 있다)."""
-    it = _item(item_id, user)
+    it = _item(item_id, user, kind)
     if it["owner"] == user.email:
         raise HTTPException(409, "소유자는 사용 취소 대상이 아닙니다")
     if not db.get_usage_request(it["id"], user.email):
@@ -112,29 +115,29 @@ class DecisionIn(BaseModel):
     reason: str = Field("", max_length=200)
 
 
-def _item(item_id: int, user: auth.User) -> dict:
-    it = catalog.visible_item(item_id, user, "mcp")
-    return it
+def _item(item_id: int, user: auth.User, kind: str = "mcp") -> dict:
+    return catalog.visible_item(item_id, user, kind)
 
 
-@router.get("/mcp/{item_id}/usage")
-def my_usage(item_id: int, user: auth.User = Depends(auth.current_user)):
-    return state_for(_item(item_id, user), user)
+@router.get("/{kind}/{item_id}/usage")
+def my_usage(kind: UsageKind, item_id: int, user: auth.User = Depends(auth.current_user)):
+    return state_for(_item(item_id, user, kind), user)
 
 
-@router.post("/mcp/{item_id}/usage")
-def request_usage(item_id: int, user: auth.User = Depends(auth.current_user)):
+@router.post("/{kind}/{item_id}/usage")
+def request_usage(kind: UsageKind, item_id: int, user: auth.User = Depends(auth.current_user)):
     """사용 신청. 등록이 끝난 MCP 에만 가능하고, 이미 승인됐거나 대기 중이면 다시 보내지 않는다."""
-    it = _item(item_id, user)
+    it = _item(item_id, user, kind)
+    label = _LABEL[kind]
     if it["registry_status"] != "APPROVED":
-        raise HTTPException(409, "등록이 완료된 MCP 에만 사용 신청할 수 있습니다")
+        raise HTTPException(409, f"등록이 완료된 {label} 에만 사용 신청할 수 있습니다")
     if it["owner"] == user.email:
         raise HTTPException(409, "소유자는 신청 없이 사용할 수 있습니다")
     cur = db.get_usage_request(it["id"], user.email)
     if cur and cur["status"] == "PENDING":
         raise HTTPException(409, "이미 사용 신청 중입니다")
     if cur and cur["status"] == "APPROVED":
-        raise HTTPException(409, "이미 사용 승인된 MCP 입니다")
+        raise HTTPException(409, f"이미 사용 승인된 {label} 입니다")
     db.put_usage_request(it["id"], user.email, "PENDING")
     if policy.get()["auto_review"]:                                   # 신청 즉시 자동 승인 (읽지 못하면 꺼짐)
         pol = policy.get()
@@ -151,13 +154,13 @@ def _can_review(record_id: str | None, user: auth.User) -> bool:
 
 @router.get("/usage-requests")
 def pending_requests(status: Literal["PENDING", "APPROVED", "REJECTED"] = "PENDING", user: auth.User = Depends(auth.current_user)):
-    """내가 처리할 수 있는 사용 신청 목록(관리자는 전부, reviewer 는 자기에게 지정된 MCP 의 것만)."""
+    """내가 처리할 수 있는 사용 신청 목록(관리자는 전부, reviewer 는 자기에게 지정된 MCP/Agent 의 것만)."""
     out = []
     for r in db.list_usage_requests(status=status):
         it = db.get_item(r["item_id"])
-        if not it or it["kind"] != "mcp" or not _can_review(it["registry_record_id"], user):
+        if not it or it["kind"] not in USAGE_KINDS or not _can_review(it["registry_record_id"], user):
             continue
-        out.append({**r, "mcp": {"id": it["id"], "name": it["name"], "owner": it["owner"], "description": it["description"]}})
+        out.append({**r, "mcp": {"id": it["id"], "kind": it["kind"], "name": it["name"], "owner": it["owner"], "description": it["description"]}})
     if user.role != "admin" and not out and not admins.reviewing(user.email):
         raise HTTPException(403, "승인 권한이 없습니다")
     return {"requests": out}
@@ -166,7 +169,7 @@ def pending_requests(status: Literal["PENDING", "APPROVED", "REJECTED"] = "PENDI
 @router.post("/usage-requests/{item_id}/{email}/decision")
 def decide_usage(item_id: int, email: str, body: DecisionIn, user: auth.User = Depends(auth.current_user)):
     it = db.get_item(item_id)
-    if not it or it["kind"] != "mcp" or not _can_review(it["registry_record_id"], user):
+    if not it or it["kind"] not in USAGE_KINDS or not _can_review(it["registry_record_id"], user):
         raise HTTPException(404, "not found")                          # 처리 권한이 없는 신청은 존재 여부도 알리지 않는다
     cur = db.get_usage_request(item_id, email)
     if not cur:

@@ -5,6 +5,7 @@ import ConfirmDialog, { type ConfirmSpec } from "./ConfirmDialog";
 import McpHowTo from "./McpHowTo";
 import McpTest from "./McpTest";
 import { statusText } from "./Explore";
+import AgentHowTo from "./AgentHowTo";
 import PromptTest from "./PromptTest";
 import ReviewerPicker from "./ReviewerPicker";
 
@@ -147,7 +148,9 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
     setBusy(false);
   }
   const upd = (i: Item) => { onChanged(i); setDesc(i.description); };
-  const loadUsage = () => { if (item.kind === "mcp") api.myUsage(item.id).then(setUsage).catch(() => setUsage(null)); };
+  const needsUsage = item.kind === "mcp" || item.kind === "agent";
+  const kindLabel = item.kind === "agent" ? "Agent" : "MCP";
+  const loadUsage = () => { if (needsUsage) api.myUsage(item.id, item.kind as api.UsageKind).then(setUsage).catch(() => setUsage(null)); };
   useEffect(loadUsage, [item.id, item.registry_status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 등록 직후 record 는 CREATING 이고 1~2초 뒤 DRAFT 가 된다. 포털 상태가 낡은 채 굳지 않도록
@@ -164,17 +167,17 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
     return () => { alive = false; clearTimeout(t); };
   }, [item.id, item.registry_record_id, item.registry_status]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const usageAction = item.kind === "mcp" && usage?.applicable && usage.status !== "OWNER" ? (
+  const usageAction = needsUsage && usage?.applicable && usage.status !== "OWNER" ? (
     usage.status === "APPROVED" || usage.status === "PENDING" ? (
       <button type="button" className="btn ghost" disabled={busy}
         onClick={() => setAsk({ title: usage.status === "APPROVED" ? "사용을 취소할까요?" : "사용 신청을 취소할까요?",
           lines: ["취소하면 reviewer 승인 없이 바로 적용되며, 다시 쓰려면 사용 신청을 새로 해야 합니다."], confirmLabel: "사용 취소", danger: true,
-          onConfirm: () => run(() => api.cancelUsage(item.id), (u) => { setUsage(u); setMsg("사용 신청을 취소 했습니다."); }) })}>
+          onConfirm: () => run(() => api.cancelUsage(item.id, item.kind as api.UsageKind), (u) => { setUsage(u); setMsg("사용 신청을 취소 했습니다."); }) })}>
         {usage.status === "APPROVED" ? "사용 취소" : "신청 취소"}</button>
     ) : (
       <button type="button" className="btn" disabled={busy || !usage.can_request}
-        title={usage.can_request ? "" : "등록이 완료된 MCP 에만 신청할 수 있습니다"}
-        onClick={() => run(() => api.requestUsage(item.id), (u) => { setUsage(u); setMsg(u.status === "APPROVED" ? "사용 신청이 바로 승인되었습니다." : "사용 신청을 보냈습니다. reviewer 가 승인하면 사용할 수 있습니다."); })}>사용 신청</button>
+        title={usage.can_request ? "" : `등록이 완료된 ${kindLabel} 에만 신청할 수 있습니다`}
+        onClick={() => run(() => api.requestUsage(item.id, item.kind as api.UsageKind), (u) => { setUsage(u); setMsg(u.status === "APPROVED" ? "사용 신청이 바로 승인되었습니다." : "사용 신청을 보냈습니다. reviewer 가 승인하면 사용할 수 있습니다."); })}>사용 신청</button>
     )) : undefined;
 
   return (
@@ -198,7 +201,7 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
           <PromptTest key={item.id + ":" + d.version + ":" + d.text.length} item={item} />
         </>)}
 
-        {item.kind === "mcp" && usage?.applicable && usage.status !== "OWNER" && (
+        {needsUsage && usage?.applicable && usage.status !== "OWNER" && (
           <div role="region" aria-label="사용 신청 상태">
             {usage.status === "APPROVED" ? null
               : usage.status === "PENDING" ? <p className="note" role="status">사용 신청 중입니다. reviewer 가 승인하면 사용할 수 있습니다.</p>
@@ -245,22 +248,26 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
         {item.kind === "agent" && (<><h3>정보</h3>
           <dl className="kv"><div><dt>종류</dt><dd>{d.agent_type}</dd></div>{d.status && <div><dt>상태</dt><dd>{d.status}</dd></div>}
             {d.protocol && <div><dt>프로토콜</dt><dd>{d.protocol}</dd></div>}
+            <div><dt>인증</dt><dd>{d.auth === "JWT" ? "JWT (Cognito 토큰)" : d.auth === "IAM" ? "IAM (SigV4)" : "확인 중"}</dd></div>
             {d.arn && <div className="wide-row"><dt>ARN</dt><dd className="mono sm arn">{d.arn}</dd></div>}</dl>
-          {d.arn && !(d.agent_type === "runtime" && d.protocol === "MCP") && (<>
-            <h3>테스트 <span className="hint">{d.agent_type === "harness" ? "harness" : "AgentCore runtime"}</span></h3>
-            <McpTest key={item.id} item={item} /></>)}
+          {usage && !usage.can_use && <p className="hint">사용 신청이 승인되면 이 Agent 를 테스트할 수 있습니다.</p>}
+          {d.arn && !(d.agent_type === "runtime" && d.protocol === "MCP") && (usage?.can_use ?? true) && (<>
+            <AgentHowTo item={item} />
+            {d.auth === "JWT" ? <p className="hint">JWT 인증 harness 는 포털에서 직접 테스트할 수 없습니다. 위 사용 방법의 예제로 호출하세요.</p> : (<>
+              <h3>테스트 <span className="hint">{d.agent_type === "harness" ? "harness" : "AgentCore runtime"}</span></h3>
+              <McpTest key={item.id} item={item} /></>)}</>)}
           {d.agent_type === "runtime" && d.protocol === "MCP" && <p className="hint">MCP 프로토콜 runtime은 대화형 agent가 아니라 MCP 서버입니다. MCP 탭에서 테스트하세요.</p>}
           </>)}
 
         <h3>Agent Registry</h3>
         {item.registry_record_id ? (<div>
-          <p>Record <span className="mono sm">{item.registry_record_id}</span> <span className={`badge st-${item.registry_status}`}>{statusText(item.registry_status, item.kind === "mcp" ? usage?.can_use : undefined)}</span>
+          <p>Record <span className="mono sm">{item.registry_record_id}</span> <span className={`badge st-${item.registry_status}`}>{statusText(item.registry_status, needsUsage ? usage?.can_use : undefined)}</span>
             {transient && <span className="hint"> 등록 처리 중… 완료되면 승인 요청 버튼이 나타납니다.</span>}</p>
           <div className="actions left">
             <button className="btn ghost" disabled={busy} onClick={() => run(() => api.refreshRegistry(item.kind, item.id), async (i) => {
               upd(i);
-              if (i.kind === "mcp" && i.registry_status === "APPROVED") {      // MCP: 등록 + 사용 신청 상태를 한 문장으로
-                const u = await api.myUsage(i.id).catch(() => null); if (u) setUsage(u);
+              if ((i.kind === "mcp" || i.kind === "agent") && i.registry_status === "APPROVED") {      // MCP/Agent: 등록 + 사용 신청 상태를 한 문장으로
+                const u = await api.myUsage(i.id, i.kind as api.UsageKind).catch(() => null); if (u) setUsage(u);
                 const st = u?.status;
                 setMsg(st === "APPROVED" || st === "OWNER" ? "등록과 사용신청이 완료되었습니다."
                   : st === "PENDING" ? "등록후 사용신청 중입니다." : "등록되었지만 사용 신청은 되지 않았습니다.");

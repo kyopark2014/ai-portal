@@ -43,7 +43,7 @@ export default function AgentCreate({ user }: { user: api.User }) {
   const [created, setCreated] = useState<api.Item | null>(null);
 
   useEffect(() => {
-    api.getGatewayModels().then((r) => {
+    api.getAgentModels().then((r) => {
       const ok = r.models.filter((m) => m.usable);
       setModels(ok); setModel((cur) => cur || ok[0]?.id || "");
     }).catch((e) => setLoadErr(`모델 목록: ${e.message}`));
@@ -128,7 +128,7 @@ export default function AgentCreate({ user }: { user: api.User }) {
 
       {step === 4 && (<>
         <div className="field"><span className="lbl">인증</span>
-          <label style={{ display: "block" }}><input type="radio" checked={authKind === "IAM"} onChange={() => setAuthKind("IAM")} /> IAM <span className="hint">AWS 자격 증명(SigV4)으로 호출</span></label>
+          <label style={{ display: "block", marginBottom: ".35rem" }}><input type="radio" checked={authKind === "IAM"} onChange={() => setAuthKind("IAM")} /> IAM <span className="hint">AWS 자격 증명(SigV4)으로 호출</span></label>
           <label style={{ display: "block" }}><input type="radio" checked={authKind === "JWT"} onChange={() => setAuthKind("JWT")} /> JWT Tokens <span className="hint">Cognito 가 발급한 토큰으로 호출</span></label>
         </div>
         <dl className="kv">

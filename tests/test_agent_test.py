@@ -119,6 +119,7 @@ def test_sessions_are_isolated_per_user_and_errors_are_events(env, monkeypatch):
     monkeypatch.setattr(aws.boto3, "client", lambda *a, **k: RTc())
     iid = agent({"arn": RT, "agent_type": "runtime"})
     db.update_item(iid, registry_status="APPROVED")   # 다른 사용자가 보려면 승인된 항목이어야 한다
+    db.put_usage_request(iid, "b@x.com", "PENDING"); db.put_usage_request(iid, "b@x.com", "APPROVED", decided_by="t")   # 사용 승인
     r = client("a@x.com").post(f"/api/agents/{iid}/chat", json=BODY)
     client("b@x.com").post(f"/api/agents/{iid}/chat", json=BODY)
     assert r.status_code == 200 and '"error": "boom"' in r.text and seen[0] != seen[1]
@@ -128,10 +129,15 @@ def test_internal_harness_runtimes_are_not_synced(env, monkeypatch):
     monkeypatch.setattr(aws, "list_all_prompts", lambda: [])
     monkeypatch.setattr(aws, "list_harnesses", lambda: [])
     monkeypatch.setattr(aws, "list_gateways", lambda reg=None: [])
-    monkeypatch.setattr(aws, "runtime_protocol", lambda rid: "HTTP")
+    monkeypatch.setattr(aws, "runtime_info", lambda rid: {"protocol": "HTTP", "auth": "IAM"})
     monkeypatch.setattr(aws, "list_runtimes", lambda: [
         {"agentRuntimeId": "agentic_work-A1", "agentRuntimeName": "agentic_work", "agentRuntimeArn": RT, "status": "READY"},
         {"agentRuntimeId": "harness_ai_portal-R1", "agentRuntimeName": "harness_ai_portal", "agentRuntimeArn": "x", "status": "READY"}])
     catalog.sync_all()
     names = [i["name"] for i in db.list_items("agent")]
     assert names == ["agentic_work"] and db.list_items("agent")[0]["data"]["protocol"] == "HTTP"
+
+
+def test_jwt_harness_is_not_callable_from_portal(env):
+    iid = agent({"arn": HN, "agent_type": "harness", "auth": "JWT"})
+    assert client().post(f"/api/agents/{iid}/chat", json=BODY).status_code == 422

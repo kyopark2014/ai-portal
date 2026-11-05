@@ -43,7 +43,7 @@ export default function Approvals({ openId, onOpened, isAdmin = false }: { openI
     <section aria-labelledby="ap-h">
       <div className="page-head"><h1 id="ap-h">승인</h1>
         <button type="button" className="btn ghost" onClick={load} disabled={loading}>새로고침</button></div>
-      <p className="sub"><b>등록 승인</b>(관리자 전용)은 Registry에 승인 요청된 record를, <b>사용 승인</b>은 등록된 MCP를 쓰겠다는 사용 신청을 검토합니다. reviewer 는 자기가 맡은 MCP 의 사용 신청만 보입니다(관리자는 전체).</p>
+      <p className="sub"><b>등록 승인</b>(관리자 전용)은 Registry에 승인 요청된 record를, <b>사용 승인</b>은 등록된 MCP·Agent를 쓰겠다는 사용 신청을 검토합니다. reviewer 는 자기가 맡은 항목의 사용 신청만 보입니다(관리자는 전체).</p>
       <div className="tabs" role="tablist" aria-label="승인 종류">
         {SECTIONS.filter((t) => isAdmin || t.s === "USAGE").map((t) => <button key={t.s} role="tab" aria-selected={section === t.s} className={`tab ${section === t.s ? "on" : ""}`} onClick={() => setSection(t.s)}>{t.label}</button>)}
       </div>

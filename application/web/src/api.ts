@@ -51,6 +51,7 @@ export const refreshRegistry = (kind: Kind, id: number) => callErr<Item & { regi
 export const submitRegistry = (kind: Kind, id: number) => callErr<Item>(`/api/catalog/${kind}/${id}/registry/submit`, json("POST"));
 
 // ── prompt 테스트 (Gateway) ──
+export const getAgentModels = () => callErr<{ models: GwModel[] }>("/api/agents/models");
 export interface GwModel { id: string; provider: string; endpoint: "chat" | "messages" | null; usable: boolean }
 export interface ChatMsg { role: "user" | "assistant"; content: string }
 export const getGatewayModels = (refresh = false) =>
@@ -191,7 +192,7 @@ export interface Policy { auto_approval: boolean; auto_review: boolean; changed_
 export const getPolicy = () => callErr<Policy>("/api/policy");
 export const setPolicy = (body: Partial<Pick<Policy, "auto_approval" | "auto_review">>) => callErr<Policy>("/api/policy", json("PUT", body));
 
-// ── MCP 사용 신청 ──
+// ── MCP·Agent 사용 신청 ──
 export interface UsageState {
   applicable: boolean; registered?: boolean; can_use?: boolean; can_request?: boolean;
   status?: "OWNER" | "NONE" | "PENDING" | "APPROVED" | "REJECTED"; reason?: string;
@@ -199,11 +200,12 @@ export interface UsageState {
 export interface UsageRequest {
   item_id: number; email: string; status: "PENDING" | "APPROVED" | "REJECTED"; requested_at: number;
   decided_at: number | null; decided_by: string; reason: string;
-  mcp: { id: number; name: string; owner: string; description: string };
+  mcp: { id: number; kind?: "mcp" | "agent"; name: string; owner: string; description: string };
 }
-export const myUsage = (id: number) => callErr<UsageState>(`/api/mcp/${id}/usage`);
-export const cancelUsage = (id: number) => callErr<UsageState>(`/api/mcp/${id}/usage`, json("DELETE"));
-export const requestUsage = (id: number) => callErr<UsageState>(`/api/mcp/${id}/usage`, json("POST"));
+export type UsageKind = "mcp" | "agent";
+export const myUsage = (id: number, kind: UsageKind = "mcp") => callErr<UsageState>(`/api/${kind}/${id}/usage`);
+export const cancelUsage = (id: number, kind: UsageKind = "mcp") => callErr<UsageState>(`/api/${kind}/${id}/usage`, json("DELETE"));
+export const requestUsage = (id: number, kind: UsageKind = "mcp") => callErr<UsageState>(`/api/${kind}/${id}/usage`, json("POST"));
 export const listUsageRequests = (status: "PENDING" | "APPROVED" | "REJECTED" = "PENDING") =>
   callErr<{ requests: UsageRequest[] }>(`/api/usage-requests?status=${status}`);
 export const decideUsage = (itemId: number, email: string, decision: "APPROVED" | "REJECTED", reason = "") =>

@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import auth, aws, catalog, mcp_test
+from . import auth, aws, catalog, mcp_test, usage
 
 router = APIRouter(prefix="/api")
 MAX_TURNS = 20
@@ -128,7 +128,10 @@ def chat(item_id: int, body: AgentChatIn, user: auth.User = Depends(auth.current
     if sum(len(m.content) for m in body.messages) > MAX_CHARS:
         raise HTTPException(422, "대화가 너무 깁니다. 새 대화를 시작하세요")
     it = catalog.visible_item(item_id, user, "agent")
+    usage.require_use(it, user)                                   # 사용 신청이 승인된 사람(소유자 포함)만 대화할 수 있다
     kind, arn = target_of(it)
+    if kind == "harness" and (it["data"] or {}).get("auth") == "JWT":
+        raise HTTPException(422, "JWT 인증 harness 는 포털에서 직접 호출할 수 없습니다. 사용 방법의 예제로 Cognito 토큰을 받아 호출하세요")
     system = catalog.harness_system_prompt(user, body.prompt_id) if kind == "harness" else None   # runtime 에는 해당 없음
     history = [m.model_dump() for m in body.messages]
     # 사용자별로 세션을 분리해 다른 사용자의 agent 세션/메모리를 재사용하지 못하게 한다

@@ -13,9 +13,10 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(catalog, "start_sync", lambda force=False: False)
     monkeypatch.setattr(catalog, "selected_registry", lambda: None)
     monkeypatch.setattr(gateway, "list_models", lambda force=False: [
-        {"id": "m1", "usable": True, "provider": "x", "endpoint": "chat"}, {"id": "m2", "usable": False, "provider": "x", "endpoint": None}])
+        {"id": "global.anthropic.m1", "usable": True, "provider": "BEDROCK", "endpoint": "messages"},
+        {"id": "m2", "usable": False, "provider": "BEDROCK", "endpoint": None},
+        {"id": "gpt-x", "usable": True, "provider": "BEDROCK_RUNTIME_OPENAI", "endpoint": "chat"}])
     monkeypatch.setattr(agent_create, "role_arn", lambda: "arn:aws:iam::123456789012:role/r")
-    monkeypatch.setattr(agent_create, "_llm_key_arn", lambda: "arn:key")
     calls = []
 
     class C:
@@ -33,7 +34,7 @@ def client(email="a@x.com"):
 
 
 def post(c, **over):
-    return c.post("/api/agents/create", json={"name": "my_agent", "model": "m1", **over})
+    return c.post("/api/agents/create", json={"name": "my_agent", "model": "global.anthropic.m1", **over})
 
 
 @pytest.mark.parametrize("bad", ["my-agent", "1abc", "a b", "한글", "x" * 41])
@@ -46,13 +47,14 @@ def test_create_with_text_prompt_and_iam(env):
     assert r.status_code == 200, r.text
     kw = env[0]
     assert kw["harnessName"] == "my_agent" and kw["systemPrompt"] == [{"text": "be nice"}]
-    assert kw["model"]["liteLlmModelConfig"]["modelId"] == "openai/m1" and "authorizerConfiguration" not in kw
+    assert kw["model"] == {"bedrockModelConfig": {"modelId": "global.anthropic.m1", "maxTokens": 4096}} and "authorizerConfiguration" not in kw
     it = db.list_items("agent")[0]
     assert it["ext_id"] == "harness:h-1" and it["data"]["agent_type"] == "harness"
 
 
 def test_unusable_model_and_duplicate(env):
     assert post(client(), model="m2").status_code == 422
+    assert post(client(), model="gpt-x").status_code == 422                       # Bedrock Claude 만
     assert post(client()).status_code == 200 and post(client()).status_code == 409
 
 

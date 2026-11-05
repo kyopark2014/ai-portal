@@ -296,10 +296,6 @@ def create_harness_role() -> str:
                 "bedrock-agentcore:ListSessions", "bedrock-agentcore:GetMemory",
                 "bedrock-agentcore:RetrieveMemoryRecords", "bedrock-agentcore:ListMemoryRecords"],
              "Resource": [f"arn:aws:bedrock-agentcore:{region}:{account_id}:memory/*"]},    # 포털에서 만든 에이전트(harness)의 메모리도 포함
-            # 포털에서 만든 에이전트가 AWSome AI Gateway 키(AgentCore Identity API key provider)를 읽는다
-            {"Sid": "ModelApiKey", "Effect": "Allow", "Action": [
-                "bedrock-agentcore:GetWorkloadAccessToken", "bedrock-agentcore:GetResourceApiKey"],
-             "Resource": ["*"]},
         ]}))
     time.sleep(10)  # IAM 전파
     return arn
@@ -310,8 +306,8 @@ def ensure_harness() -> Dict[str, str]:
     logger.info("[1c] Harness agent '%s'", harness_api_name())
     api_name = harness_api_name()
     h = next((x for x in agentcore.list_harnesses().get("harnesses", []) if x.get("harnessName") == api_name), None)
+    role = create_harness_role()      # 역할/정책은 harness 가 이미 있어도 항상 맞춘다(새 권한이 추가되면 기존 설치에도 반영되도록)
     if not h:
-        role = create_harness_role()
         for attempt in range(6):
             try:
                 h = agentcore.create_harness(

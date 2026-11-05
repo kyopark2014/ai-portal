@@ -142,13 +142,18 @@ def get_harness(harness_id: str) -> dict:
     return client("bedrock-agentcore-control").get_harness(harnessId=harness_id)["harness"]
 
 
-def runtime_protocol(runtime_id: str) -> str:
-    """runtime 의 serverProtocol(HTTP/MCP/A2A). 조회 실패 시 빈 문자열."""
+def runtime_info(runtime_id: str) -> dict:
+    """runtime 의 serverProtocol(HTTP/MCP/A2A) 과 인증 방식(JWT/IAM). 조회 실패 시 빈 값."""
     try:
         g = client("bedrock-agentcore-control").get_agent_runtime(agentRuntimeId=runtime_id)
-        return (g.get("protocolConfiguration") or {}).get("serverProtocol", "")
+        return {"protocol": (g.get("protocolConfiguration") or {}).get("serverProtocol", ""),
+                "auth": "JWT" if g.get("authorizerConfiguration") else "IAM"}
     except Exception:  # noqa: BLE001
-        return ""
+        return {"protocol": "", "auth": ""}
+
+
+def runtime_protocol(runtime_id: str) -> str:
+    return runtime_info(runtime_id)["protocol"]
 
 
 def list_runtimes() -> list[dict]:
