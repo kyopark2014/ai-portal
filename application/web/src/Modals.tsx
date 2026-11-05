@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import * as api from "./api";
 import type { Item, Kind, RegistryInfo, User } from "./api";
 import ConfirmDialog, { type ConfirmSpec } from "./ConfirmDialog";
+import McpHowTo from "./McpHowTo";
 import McpTest from "./McpTest";
 import { statusText } from "./Explore";
 import PromptTest from "./PromptTest";
@@ -218,6 +219,7 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
             <div className="wide-row"><dt>MCP endpoint</dt><dd className="mono sm arn">{d.endpoint || "-"}</dd></div>
           </dl>
           {(usage?.can_use ?? true) && (<>
+            <McpHowTo item={item} />
             <h3>테스트 <span className="hint">harness agent</span></h3>
             <McpTest key={item.id} item={item} /></>)}
         </>)}
@@ -229,6 +231,7 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
           {d.headers?.length > 0 && <p className="hint">헤더: {d.headers.map((h: any) => h.key).join(", ")} (값은 숨김)</p>}
           <div className="actions left"><button className="btn ghost" disabled={busy} onClick={() => run(() => api.testMcp(item.id), (r) => setOut(`initialize: HTTP ${r.status}\ntools/list: HTTP ${r.tools_status}\n\n${r.body}`))}>연결 테스트 (tools/list)</button></div>
           {out && <pre className="code out">{out}</pre>}
+          <McpHowTo item={item} />
           <h3>테스트 <span className="hint">harness agent</span></h3>
           <McpTest key={item.id} item={item} />
         </>)}

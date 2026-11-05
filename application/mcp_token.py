@@ -31,7 +31,7 @@ def settings() -> dict[str, str]:
     """Cognito 설정. 환경 변수가 우선, 없으면 config.json(installer 가 기록)."""
     g = lambda env, key: os.environ.get(env, "") or catalog.config_value(key)
     return {"pool": g("COGNITO_USER_POOL_ID", "cognito_user_pool_id"), "client": g("COGNITO_CLIENT_ID", "cognito_client_id"),
-            "region": g("COGNITO_REGION", "cognito_region") or "us-east-1"}
+            "region": g("COGNITO_REGION", "cognito_region") or "us-east-1", "domain": g("COGNITO_DOMAIN", "cognito_domain")}
 
 
 def _cognito():

@@ -1,6 +1,6 @@
 export type Role = "admin" | "user";
 export interface User { email: string; name: string; picture: string; role: Role; can_review?: boolean; reviewing?: number }
-export interface PublicConfig { googleClientId: string; projectName: string }
+export interface PublicConfig { googleClientId: string; projectName: string; cognitoClientId?: string; cognitoDomain?: string }
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, { credentials: "same-origin", ...init });
@@ -208,3 +208,10 @@ export const listUsageRequests = (status: "PENDING" | "APPROVED" | "REJECTED" = 
   callErr<{ requests: UsageRequest[] }>(`/api/usage-requests?status=${status}`);
 export const decideUsage = (itemId: number, email: string, decision: "APPROVED" | "REJECTED", reason = "") =>
   callErr<unknown>(`/api/usage-requests/${itemId}/${encodeURIComponent(email)}/decision`, json("POST", { decision, reason }));
+
+// ── 에이전트 생성 (harness) ──
+export interface AgentCreateBody {
+  name: string; model: string; system_prompt: string; prompt_id: number | null;
+  mcp_ids: number[]; skill_ids: number[]; auth: "IAM" | "JWT"; description?: string;
+}
+export const createAgent = (body: AgentCreateBody) => callErr<Item & { registry_error?: string }>("/api/agents/create", json("POST", body));

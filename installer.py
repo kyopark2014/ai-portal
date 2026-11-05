@@ -295,7 +295,11 @@ def create_harness_role() -> str:
                 "bedrock-agentcore:ListEvents", "bedrock-agentcore:CreateEvent", "bedrock-agentcore:GetEvent",
                 "bedrock-agentcore:ListSessions", "bedrock-agentcore:GetMemory",
                 "bedrock-agentcore:RetrieveMemoryRecords", "bedrock-agentcore:ListMemoryRecords"],
-             "Resource": [f"arn:aws:bedrock-agentcore:{region}:{account_id}:memory/{harness_api_name()}-*"]},
+             "Resource": [f"arn:aws:bedrock-agentcore:{region}:{account_id}:memory/*"]},    # 포털에서 만든 에이전트(harness)의 메모리도 포함
+            # 포털에서 만든 에이전트가 AWSome AI Gateway 키(AgentCore Identity API key provider)를 읽는다
+            {"Sid": "ModelApiKey", "Effect": "Allow", "Action": [
+                "bedrock-agentcore:GetWorkloadAccessToken", "bedrock-agentcore:GetResourceApiKey"],
+             "Resource": ["*"]},
         ]}))
     time.sleep(10)  # IAM 전파
     return arn
@@ -786,6 +790,15 @@ def create_ecs_roles(secret_arns: List[str]) -> Dict[str, str]:
                 "bedrock-agentcore:ListRegistries", "bedrock-agentcore:GetRegistry",
                 # MCP 탭: AgentCore Gateway 동기화
                 "bedrock-agentcore:ListGateways", "bedrock-agentcore:GetGateway"]},
+            # 에이전트 생성: harness 를 만들고, Gateway 키를 AgentCore Identity 에 저장하며, harness 실행 역할을 넘긴다
+            {"Sid": "CreateAgents", "Effect": "Allow", "Resource": "*", "Action": [
+                "bedrock-agentcore:CreateHarness", "bedrock-agentcore:GetApiKeyCredentialProvider",
+                "bedrock-agentcore:CreateApiKeyCredentialProvider", "bedrock-agentcore:GetResourceApiKey",
+                "bedrock-agentcore:GetWorkloadAccessToken", "bedrock-agentcore:CreateWorkloadIdentity",
+                "bedrock-agentcore:GetWorkloadIdentity", "secretsmanager:CreateSecret", "secretsmanager:TagResource"]},
+            {"Sid": "PassHarnessRole", "Effect": "Allow", "Action": "iam:PassRole",
+             "Resource": [f"arn:aws:iam::{account_id}:role/role-harness-for-{project_name}-{region}"],
+             "Condition": {"StringEquals": {"iam:PassedToService": "bedrock-agentcore.amazonaws.com"}}},
             # Agent/MCP 테스트: 포털이 harness·runtime 을 호출한다
             {"Sid": "InvokeAgents", "Effect": "Allow", "Resource": "*", "Action": [
                 "bedrock-agentcore:InvokeHarness", "bedrock-agentcore:InvokeAgentRuntime",

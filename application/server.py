@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import admins, agent_test, approvals, auth, catalog, chat, db, mcp_test, mcp_token, usage
+from . import admins, agent_create, agent_test, approvals, auth, catalog, chat, db, mcp_test, mcp_token, usage
 
 DIST = Path(__file__).resolve().parent / "web" / "dist"
 _docs = os.environ.get("ENABLE_API_DOCS") == "1"
@@ -59,7 +59,9 @@ def health():
 @app.get("/api/config")
 def public_config():
     """브라우저에 필요한 공개 값만 반환한다."""
-    return {"googleClientId": auth.google_client_id(), "projectName": "AI Portal"}
+    # cognitoClientId: 비밀이 아닌 공개 앱 클라이언트 ID(시크릿 없음). MCP '사용 방법' 예제에 들어간다.
+    return {"googleClientId": auth.google_client_id(), "projectName": "AI Portal",
+            "cognitoClientId": mcp_token.settings()["client"], "cognitoDomain": mcp_token.settings().get("domain", "")}
 
 
 class GoogleLogin(BaseModel):
@@ -111,6 +113,7 @@ def admin_ping(user: auth.User = Depends(require_admin)):
 app.include_router(catalog.router)
 app.include_router(chat.router)
 app.include_router(mcp_test.router)
+app.include_router(agent_create.router)
 app.include_router(agent_test.router)
 app.include_router(approvals.router)
 app.include_router(approvals.admins_router)

@@ -261,6 +261,7 @@ cp .env.example .env     # GOOGLE_CLIENT_ID, LLM_GATEWAY_KEY 등 입력
 - **Registry 는 하나로 고정**: 이 포털은 설치기(`installer.py`)가 만든 `ai-portal` Registry 하나만 씁니다(`REGISTRY_ID` 환경 변수, 없으면 `config.json`). 화면과 API 어디에도 Registry 를 **만들거나·목록으로 보거나·바꾸는** 기능이 없고(관리자도 불가), 예전에 화면에서 골랐던 설정값이 남아 있어도 무시합니다. 인증 방식(IAM)은 설치 때 정해집니다. 설치기는 이름으로 Registry 를 찾아 **없으면(삭제됐으면) 새로 만들고** 새 ID 를 `config.json` 에 기록합니다. 관리 화면은 연결된 Registry 를 읽기 전용(`GET /api/registry`)으로 보여줍니다.
 - **MCP 사용 신청**: Registry 에 등록(APPROVED)된 MCP 는 카드·목록에 **등록** 으로 표시되고, 보는 사람이 쓸 수 있으면(사용 신청 승인됨, 또는 소유자) **사용 가능** 으로 바뀝니다(목록 응답의 `usable`). 그 외 종류는 등록이 끝이라 계속 "등록". 일반 사용자가 MCP 를 열어 **사용 신청** 을 누르면(등록 완료 후에만 가능) 해당 MCP 의 reviewer·관리자에게 신청이 가고, 승인되면 그 사용자에게 **사용 가능** 으로 표시되며 테스트/연결이 열립니다. 승인 전에는 목록·상세는 보이지만 테스트/연결은 403 으로 막힙니다(소유자는 항상 사용 가능, **관리자도 일반 사용자처럼 신청·승인이 필요**하며 승인 후 사용 취소도 같습니다). 처리는 승인 화면의 **사용 신청** 탭(관리자는 전체, reviewer 는 자기 MCP 만). Auto-review 가 켜져 있으면 신청이 즉시 자동 승인(`[auto-review]`)됩니다. 신청은 DynamoDB(`USAGE#<id>` / 이메일)에 저장됩니다. API: `GET/POST /api/mcp/{id}/usage`, `GET /api/usage-requests`, `POST /api/usage-requests/{id}/{email}/decision`. **승인 메뉴**는 관리자 또는 한 record 라도 reviewer 로 지정된 일반 사용자에게 나타나며 **등록 승인**(Registry 승인 요청, 대기·승인됨·거절됨·Deprecated 탭 — **관리자만**)과 **사용 승인**(MCP 사용 신청 — 관리자·reviewer)으로 나뉩니다(관리자는 '승인자 관리' 추가, reviewer 는 사용 승인만 보임). MCP 상세 제목 오른쪽에 **사용 신청** 버튼이 있고, 사용 가능하면 **사용 취소**(신청 중이면 신청 취소)로 바뀝니다. 사용 취소는 관리자도 할 수 있고(소유자만 대상 아님) reviewer 동의 없이 즉시 적용되고 `DELETE /api/mcp/{id}/usage` 로 신청 내역을 지웁니다(다시 쓰려면 새로 신청). 아직 사용 신청 메일은 보내지 않습니다(화면에서만 확인).
 - **승인 자동화 (관리자가 화면에서 켜고 끔, 둘 다 기본 꺼짐)**: 관리 화면의 "승인 자동화". **Auto-approval** = 등록하면 승인 요청까지 자동으로 보냅니다(승인은 여전히 reviewer 몫). **Auto-review** = 승인 요청이 오면 reviewer·관리자의 허락 없이 **바로 APPROVED** 처리해 요청자가 즉시 쓸 수 있게 합니다(Lambda 없이 요청을 처리하는 서버 안에서 처리). 둘 다 켜면 등록만으로 사용 가능합니다. 켜는 것은 확인 창을 거치고, 변경한 관리자·시각이 기록되며, 자동 승인된 record 의 `statusReason` 은 `[auto-review] 자동 검토 (설정: <관리자>)` 로 사람의 승인(`[by 이메일]`)과 구분됩니다. 정책은 SSM `/ai-portal/policy` 에 저장되어 재배포 후에도 유지되고, **읽지 못하면 꺼짐으로 봅니다**(장애로 검토 없이 승인되는 일 방지). 자동 승인에 실패하면 `PENDING_APPROVAL` 로 남아 사람이 승인할 수 있습니다. AWS Registry 자체의 `autoApproval` 설정은 쓰지 않습니다 — 켜면 승인 사유가 비어 사람의 승인과 구분되지 않기 때문입니다(실험: 승인 요청 즉시 `APPROVED`, `statusReason` 없음).
+- **에이전트 생성 탭**: 상단 메뉴의 "내 정보" 옆 **에이전트 생성** 에서 5단계 마법사로 AgentCore **harness** 를 만듭니다. ① **이름**(영문 시작, `a-z A-Z 0-9 _` 만, 최대 40자) → ② **모델·시스템 프롬프트**(모델은 AWSome AI Gateway 목록에서 선택, 프롬프트는 직접 입력하거나 레지스트리의 prompt 한 개 선택) → ③ **MCP**(사용 신청이 승인된/내가 등록한 MCP 를 여러 개 선택. JWT 인증 Gateway 는 사용자별 토큰이 필요해 제외) → ④ **Skill**(레지스트리 skill 여러 개 선택) → ⑤ **인증**(IAM 또는 JWT Tokens=Cognito) → **생성**. API: `POST /api/agents/create`. 모델은 Gateway(OpenAI 호환)를 LiteLLM 모델로 연결하며, Gateway 키는 AgentCore Identity 의 API key credential provider(`ai-portal-llm-gateway`)에 한 번 저장해 ARN 으로만 참조합니다. harness 는 installer 가 만든 실행 역할(`role-harness-for-ai-portal-<region>`)을 쓰므로 **installer 를 다시 실행**해 포털 task role 의 권한(CreateHarness·PassRole 등)을 갱신해야 합니다. 생성 후 상세 화면에서 Registry 등록·승인 요청을 할 수 있습니다.
 - **승인(관리자)**: 상단 "승인" 메뉴 또는 메일 링크(`/approvals/<recordId>`). Registry 를 직접 조회해 대기·승인됨·거절됨·Deprecated 탭으로 보고, record 내용을 검토한 뒤 승인/거절(사유 필수)/Deprecate 합니다. Deprecated 상세의 **취소** 는 record 를 삭제하고 포털 항목을 등록 전(미등록) 상태로 되돌립니다(`POST /api/approvals/{recordId}/reset`, 관리자 전용). AWS 의 현재 상태를 확인하고 처리해 이중 처리를 막으며(409), 사유에 처리자 이메일(`[by …]`)을 남깁니다. 일반 사용자는 403.
 - **삭제**: Registry record → Prompt Management → 포털 DB 순. record 가 `CREATING` 이면 409(등록 직후 몇 초간 삭제 불가). AWS 동기화 항목은 포털 목록에서만 지워짐.
 - **Registry 기반 복원**: 동기화 마지막 단계(`sync_registry`)가 Registry 의 record 를 읽어 포털 항목과 연결합니다. DB 가 비어 있어도(재배포·신규 서버) 복구되며, 승인 상태도 Registry 에서 가져옵니다. prompt(Prompt Management 포인터)·skill(Git/S3 출처)·agent(ARN)·MCP(URL)를 record 내용에서 복원합니다. 같은 대상의 동기화 항목(prompt·agent·Gateway)이 있으면 그 항목에 연결하고(중복 생성 안 함), 없으면 새로 만듭니다. 이미 연결된 항목은 상태만 갱신하며 사용자가 고친 설명은 덮어쓰지 않습니다. `CREATING`/`UPDATING` 중인 record 와 포털이 만들지 않은 형식의 record 는 건너뜁니다. **복원되지 않는 것**: MCP 의 HTTP 헤더(Registry 에 저장하지 않음), 원래 소유자(→ 소유자 `registry`, 관리자만 수정·삭제).
@@ -339,6 +340,16 @@ claude mcp add gw-ai-portal-us-east-1 \
 
 등록한 뒤 Claude Code 안에서 `/mcp` → 해당 서버 → **Authenticate** 를 선택하면 브라우저가 열리고 Google 로그인 후 `Authentication successful` 이 표시됩니다. 이후 액세스 토큰은 Claude Code 가 리프레시 토큰으로 자동 갱신합니다.
 
+### 포털 화면의 "사용 방법"
+
+사용 가능한 MCP 의 상세 화면에서 **AgentCore Gateway** 와 **테스트 harness agent** 사이의 **사용 방법** 에 `Claude Code` · `Codex` · `Agent` 버튼이 있습니다. 누르면 그 MCP 의 endpoint·인증 방식(CUSTOM_JWT / AWS_IAM / 일반)에 맞는 예제가 복사 가능한 형태로 나옵니다.
+
+- **Claude Code**: `claude mcp add <이름> <endpoint> --transport http --client-id <cognito_client_id> --callback-port 8484` (JWT Gateway). IAM Gateway 는 `mcp-proxy-for-aws` 경유.
+- **Codex**: `codex mcp add <이름> --url <endpoint> --bearer-token-env-var MCP_TOKEN`. Codex 에는 `--client-id` 같은 OAuth 옵션이 없어 액세스 토큰을 Bearer 로 보내며, 화면에 그 설명이 함께 표시됩니다.
+- **Agent**: Strands Agents 로 MCP 를 붙이는 Python **전체 코드**(`test.py` 로 저장해 바로 실행). JWT Gateway 는 코드가 Cognito OAuth(브라우저 Google 로그인, Authorization Code + PKCE, 콜백 8484)로 토큰을 직접 받으므로 `MCP_TOKEN` 환경 변수가 필요 없습니다. 토큰은 메모리에만 두고 파일에 저장하지 않아 실행할 때마다 로그인합니다.
+
+Cognito 앱 클라이언트 ID(공개 값)는 `/api/config` 의 `cognitoClientId`(와 Cognito 도메인 `cognitoDomain`)로 내려갑니다.
+
 ### 문제 해결
 
 | 증상 | 원인·조치 |
@@ -365,6 +376,7 @@ claude mcp add gw-ai-portal-us-east-1 \
 | `POST /api/skills/{id}/chat` | Skill 테스트 — harness 에 skill 을 붙여 호출 (SSE) |
 | `POST /api/agents/{id}/chat` | Agent 테스트 — harness/runtime 호출 (SSE) |
 | `GET /api/mcp/test-status` · `POST /api/mcp/{id}/chat` | MCP 테스트 — harness agent (SSE: 텍스트·도구 호출·도구 결과) |
+| `POST /api/agents/create` | 에이전트(harness) 생성 |
 | `GET /api/approvals?status=` · `GET /api/approvals/{recordId}` · `POST /api/approvals/{recordId}/decision` | 승인 큐·검토·승인/거절 (관리자 전용) |
 | `POST …/registry/submit` | 승인 요청 |
 | `GET /api/reviewers/users?q=` · `GET/POST/DELETE /api/reviewers` | reviewer 후보 사용자 검색 · record 별 reviewer 조회·추가·제거 (관리자 전용) |

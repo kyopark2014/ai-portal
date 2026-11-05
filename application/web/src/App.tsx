@@ -3,6 +3,7 @@ import * as api from "./api";
 import Approvals from "./Approvals";
 import Explore from "./Explore";
 import AdminDashboard from "./AdminDashboard";
+import AgentCreate from "./AgentCreate";
 import MyRecords from "./MyRecords";
 import { DetailModal } from "./Modals";
 import GoogleButton, { disableAutoSelect } from "./GoogleButton";
@@ -38,7 +39,7 @@ export default function App() {
     setUser(null);
   }
 
-  const [page, setPage] = useState<"home" | "explore" | "approvals" | "admin">("explore")
+  const [page, setPage] = useState<"home" | "explore" | "approvals" | "admin" | "agent">("explore")
   // 메일 링크(/approvals/<recordId>)로 들어오면 로그인 후 해당 record 검토 화면을 연다
   const [openRec, setOpenRec] = useState<string | null>(() => {
     const m = location.pathname.match(/^\/approvals\/([A-Za-z0-9_-]{6,64})$/);
@@ -64,6 +65,7 @@ export default function App() {
           {user.can_review && <button className={page === "approvals" ? "on" : ""} onClick={() => setPage("approvals")}>승인</button>}
           {user.role === "admin" && <button className={page === "admin" ? "on" : ""} onClick={() => setPage("admin")}>관리</button>}
           <button className={page === "home" ? "on" : ""} onClick={() => setPage("home")}>내 정보</button>
+          <button className={page === "agent" ? "on" : ""} onClick={() => setPage("agent")}>에이전트 생성</button>
         </nav>
       )}
 
@@ -86,6 +88,8 @@ export default function App() {
         <AdminDashboard />
       ) : page === "explore" ? (
         <Explore user={user} />
+      ) : page === "agent" ? (
+        <AgentCreate user={user} />
 
       ) : (
         <>
