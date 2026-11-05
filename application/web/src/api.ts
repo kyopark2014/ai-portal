@@ -94,6 +94,8 @@ export interface RegDetail extends RegRecord { statusReason: string; content: un
 export const listApprovals = (status: RecStatus = "PENDING_APPROVAL") =>
   callErr<{ records: RegRecord[]; registryId: string }>(`/api/approvals?status=${status}`);
 export const getApproval = (id: string) => callErr<RegDetail>(`/api/approvals/${encodeURIComponent(id)}`);
+export const resetDeprecated = (id: string) =>
+  callErr<unknown>(`/api/approvals/${encodeURIComponent(id)}/reset`, json("POST", {}));
 export const decide = (id: string, decision: "APPROVED" | "REJECTED" | "DEPRECATED", reason: string) =>
   callErr<{ recordId: string; status: string; statusReason: string }>(
     `/api/approvals/${encodeURIComponent(id)}/decision`, json("POST", { decision, reason }));

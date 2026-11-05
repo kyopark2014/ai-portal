@@ -95,6 +95,14 @@ function ReviewModal({ id, onClose, onDone }: { id: string; onClose: () => void;
     catch (e: any) { setErr(e.message); }
     setBusy(false);
   }
+  const [resetDone, setResetDone] = useState(false);
+  async function reset() {
+    if (!window.confirm("Deprecated 된 record 를 삭제하고 등록 전 상태로 되돌릴까요?")) return;
+    setBusy(true); setErr("");
+    try { await api.resetDeprecated(id); setResetDone(true); }
+    catch (e: any) { setErr(e.message); }
+    setBusy(false);
+  }
   const pending = d?.status === "PENDING_APPROVAL";
   const allowed = d?.can_decide !== false;
 
@@ -123,7 +131,9 @@ function ReviewModal({ id, onClose, onDone }: { id: string; onClose: () => void;
             </div></>) : (
             <div className="actions"><button className="btn ghost" onClick={onClose}>닫기</button>
               {d.status === "APPROVED" && <button className="btn danger" disabled={busy} onClick={() => go("DEPRECATED")}>Deprecate</button>}
-              {done && <button className="btn" onClick={onDone}>목록으로</button>}</div>)}
+              {d.status === "DEPRECATED" && !resetDone && <button className="btn" disabled={busy} title="등록 전(미등록) 상태로 되돌립니다" onClick={reset}>취소</button>}
+              {(done || resetDone) && <button className="btn" onClick={onDone}>목록으로</button>}</div>)}
+          {resetDone && <p className="note ok" role="status">취소했습니다. 등록 전 상태로 되돌렸습니다.</p>}
           {done && <p className="note ok" role="status">{done === "APPROVED" ? "승인했습니다." : done === "REJECTED" ? "거절했습니다." : "Deprecated 처리했습니다."}</p>}
         </div>)}
         {err && <p className="note error" role="alert">{err}</p>}

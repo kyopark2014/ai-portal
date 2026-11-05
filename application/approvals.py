@@ -157,6 +157,40 @@ def decide(record_id: str, body: DecisionIn, user: auth.User = Depends(require_a
     return {"recordId": rec, "status": body.decision, "statusReason": reason}
 
 
+@router.post("/{record_id}/reset")
+def reset_deprecated(record_id: str, user: auth.User = Depends(require_admin)):
+    """Deprecated record 의 '취소': record 를 삭제하고 포털 항목을 등록 전(미등록) 상태로 되돌린다.
+
+    AWS 는 DEPRECATED → DRAFT 전이를 지원하지 않으므로 승인 요청 취소와 같이 삭제 후 재등록 방식을 쓴다.
+    """
+    rid, rec = _registry_id(), _record_id(record_id)
+    if user.role != "admin":
+        raise HTTPException(403, "관리자만 할 수 있습니다")
+    client = aws.registry_client()
+    try:
+        cur = client.get_registry_record(registryId=rid, recordId=rec)["status"]
+    except (ClientError, BotoCoreError) as e:
+        if not catalog._missing(e):
+            raise catalog.aws_err(e)
+        cur = None
+    if cur is not None and cur != "DEPRECATED":
+        raise HTTPException(409, f"Deprecated 상태가 아니라 취소할 수 없습니다 (현재: {cur})")
+    if cur is not None:
+        try:
+            client.delete_registry_record(registryId=rid, recordId=rec)
+        except (ClientError, BotoCoreError) as e:
+            if not catalog._missing(e):
+                raise catalog.aws_err(e)
+    try:
+        admins.clear_reviewers(rec)
+    except Exception:  # noqa: BLE001 — 정리는 best effort
+        pass
+    item = _portal_item(rec)
+    if item:
+        db.update_item(item["id"], registry_id=None, registry_record_id=None, registry_status=None)
+    return {"recordId": rec, "status": None}
+
+
 class AdminIn(BaseModel):
     email: str = Field(min_length=3, max_length=254)
 
