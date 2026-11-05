@@ -45,7 +45,7 @@ export default function AgentCreate({ user }: { user: api.User }) {
   useEffect(() => {
     api.getAgentModels().then((r) => {
       const ok = r.models.filter((m) => m.usable);
-      setModels(ok); setModel((cur) => cur || ok[0]?.id || "");
+      setModels(ok); setModel((cur) => cur || (ok.find((m) => m.id.endsWith("claude-sonnet-5-5")) ?? ok[0])?.id || "");
     }).catch((e) => setLoadErr(`모델 목록: ${e.message}`));
     api.listItems("prompt").then(setPrompts).catch(() => {});
     api.listItems("mcp").then((l) => setMcps(l.filter((i) =>
@@ -94,7 +94,7 @@ export default function AgentCreate({ user }: { user: api.User }) {
       )}
 
       {step === 1 && (<>
-        <label className="field"><span className="lbl">모델 <span className="hint">AWSome AI Gateway</span></span>
+        <label className="field"><span className="lbl">모델 <span className="hint">Amazon Bedrock</span></span>
           <select value={model} onChange={(e) => setModel(e.target.value)}>
             {models.length === 0 && <option value="">모델 목록 없음</option>}
             {models.map((m) => <option key={m.id} value={m.id}>{m.id}</option>)}
@@ -140,7 +140,7 @@ export default function AgentCreate({ user }: { user: api.User }) {
       </>)}
 
       {err && <p className="note error" role="alert">{err}</p>}
-      <div className="actions">
+      <div className="actions" style={{ marginTop: "1rem" }}>
         {step > 0 && <button className="btn ghost" disabled={busy} onClick={() => setStep(step - 1)}>이전</button>}
         {step < STEPS.length - 1
           ? <button className="btn" disabled={!canNext} onClick={() => setStep(step + 1)}>다음</button>
