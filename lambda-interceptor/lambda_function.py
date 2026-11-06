@@ -111,14 +111,14 @@ def _gateway_item(gw: str) -> dict | None:
 
 
 def _is_approved(claims: dict, gw: str) -> bool:
-    """토큰의 사용자가 이 gateway(MCP)의 승인자 목록(MCP 항목의 data.approved_users)에 있는가. MCP 소유자도 통과(포털과 같은 기준).
+    """토큰의 사용자가 이 gateway(MCP)의 승인자 목록(MCP 항목의 data.approved_users)에 있는가. 소유자도 예외 없이 승인이 필요하다(포털과 같은 기준).
     무엇이든 확인하지 못하면 False(fail-closed)."""
     try:
         item = _gateway_item(gw)
         email = _email(claims)
         if not item or not email:
             return False
-        return email == item["owner"] or email in item["approved"]
+        return email in item["approved"]
     except Exception as e:  # noqa: BLE001  (조회 실패·권한·네트워크 모두 거절)
         log.warning(json.dumps({"interceptor": "ai-portal", "approval_lookup_failed": type(e).__name__}))
         return False

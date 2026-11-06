@@ -16,7 +16,7 @@
   python installer.py --registry-only       # Registry 만 생성
   python installer.py --notifications-only  # 승인 요청 메일 알림(SNS + EventBridge)만 구성
   python installer.py --harness-only        # MCP 테스트용 harness agent `ai_portal` 만 생성
-  python installer.py --gateway-only        # AgentCore Gateway `gw-ai-portal-us-west-2`·`gw-ai-portal-us-east-1` (+ target, interceptor Lambda) 만 생성
+  python installer.py --gateway-only        # AgentCore Gateway `gw-ai-portal`·`gw-ai-portal-websearch-jwt`·`gw-ai-portal-websearch-iam` (+ target, interceptor Lambda) 만 생성
   python installer.py                       # 전체 설치
   python installer.py --skip-docker-build   # 인프라만 갱신(ECR 최신 이미지 재사용)
   python installer.py --image-only          # 이미지 빌드/푸시 후 서비스 재배포
@@ -340,21 +340,24 @@ def ensure_harness() -> Dict[str, str]:
 
 # ── 1d. AgentCore Gateway (gw-<project>) + interceptor Lambda ─────────────
 def gateway_name(rgn: str) -> str:
-    return f"gw-{project_name}-{rgn}"                           # 리전이 이름에 보이도록: gw-ai-portal-us-west-2 / gw-ai-portal-us-east-1
+    return f"gw-{project_name}" if rgn == region else f"gw-{project_name}-{rgn}"   # 포털 리전의 gateway: gw-ai-portal
 
 
-GATEWAY_NAME = gateway_name(region)                           # gw-ai-portal-us-west-2
+GATEWAY_NAME = gateway_name(region)                           # gw-ai-portal
 TARGET_NAME = f"target-{project_name}"                    # target-ai-portal
 INTERCEPTOR_FUNCTION = f"lambda-{project_name}-intercepter"   # lambda-ai-portal-intercepter (이름 철자는 요청대로)
 # IAM 역할은 전역이라 이름에 리전을 넣는다(리전마다 따로). us-west-2 의 기존 이름은 그대로다.
 def interceptor_role_name(rgn: str) -> str: return f"role-lambda-interceptor-for-{project_name}-{rgn}"
 def gateway_role_name(rgn: str) -> str: return f"role-gateway-for-{project_name}-{rgn}"
-# 두 번째 gateway: us-east-1 의 gw-ai-portal-us-east-1. 같은 방식(IAM 인증·interceptor)이고 target 은 web-search connector.
+# web-search gateway 두 개(us-east-1, target 은 AWS 관리형 web-search connector, 둘 다 interceptor 사용). 인증 방식만 다르다.
+#   gw-ai-portal-websearch-jwt : Cognito JWT 인증 (Claude Code 등 사용자 토큰으로 호출)
+#   gw-ai-portal-websearch-iam : IAM(SigV4) 인증 (에이전트에 붙일 수 있는 gateway)
 WEBSEARCH_REGION = "us-east-1"
-WEBSEARCH_GATEWAY_NAME = gateway_name(WEBSEARCH_REGION)
+WEBSEARCH_JWT_GATEWAY_NAME = f"gw-{project_name}-websearch-jwt"
+WEBSEARCH_IAM_GATEWAY_NAME = f"gw-{project_name}-websearch-iam"
 WEBSEARCH_TARGET_NAME = f"target-{project_name}-websearch"
-# 주의: gateway 이름은 UpdateGateway 로 바꿀 수 없다("Name cannot be updated"). 예전 이름(gw-ai-portal, gw-ai-portal-websearch)의
-# gateway 는 그대로 남으므로 필요 없으면 직접 지운다. 설치기는 새 이름으로 새로 만든다.
+# 주의: gateway 이름은 UpdateGateway 로 바꿀 수 없다("Name cannot be updated"). 예전 이름(gw-ai-portal-websearch,
+# gw-ai-portal-us-west-2, gw-ai-portal-us-east-1)의 gateway 는 그대로 남으므로 필요 없으면 직접 지운다. 설치기는 새 이름으로 새로 만든다.
 # target 이 가리킬 MCP 서버. 기본값은 인증이 필요 없는 AWS Knowledge MCP 서버 — .env 의 TARGET_MCP_ENDPOINT 로 바꾼다.
 DEFAULT_TARGET_ENDPOINT = "https://knowledge-mcp.global.api.aws"
 
@@ -465,8 +468,11 @@ def find_gateway(name: str = GATEWAY_NAME, client: Any = None) -> Optional[Dict[
             return None
 
 
+WEBSEARCH_GATEWAY_DESCRIPTION = "Websearch를 위한 AgentCore MCP gateway 입니다."
+
+
 def gateway_params(role_arn: str, interceptor_arn: str, name: str = GATEWAY_NAME,
-                   jwt: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                   jwt: Optional[Dict[str, Any]] = None, description: Optional[str] = None) -> Dict[str, Any]:
     """create_gateway 인자. MCP 프로토콜, REQUEST·RESPONSE 양쪽에 같은 인터셉터.
 
     인증: 기본은 IAM(SigV4). jwt={"discovery_url", "client_id"} 를 주면 CUSTOM_JWT — Cognito(Google federation)가 발급한 토큰을
@@ -477,7 +483,7 @@ def gateway_params(role_arn: str, interceptor_arn: str, name: str = GATEWAY_NAME
              "authorizerConfiguration": {"customJWTAuthorizer": {"discoveryUrl": jwt["discovery_url"], "allowedClients": [jwt["client_id"]]}}}
             if jwt else {"authorizerType": "AWS_IAM"})
     return dict(
-        name=name, description=f"{name} MCP gateway ({'Cognito JWT' if jwt else 'IAM'} auth, monitored by interceptor)",
+        name=name, description=description or f"{name} MCP gateway ({'Cognito JWT' if jwt else 'IAM'} auth, monitored by interceptor)",
         roleArn=role_arn, protocolType="MCP", **auth,
         interceptorConfigurations=[{
             "interceptor": {"lambda": {"arn": interceptor_arn}},
@@ -516,12 +522,14 @@ def _wait(get, ok="READY", what="") -> Dict[str, Any]:
     raise TimeoutError(f"{what} did not become {ok}")
 
 
-def ensure_gateway(rgn: str = region, websearch: bool = False, cognito_jwt: bool = False) -> Dict[str, str]:
-    """`gw-<project>-<region>` + target + interceptor Lambda 를 rgn 에 만든다. 이미 있으면 재사용한다.
+def ensure_gateway(rgn: str = region, websearch: bool = False, cognito_jwt: bool = False,
+                   name: Optional[str] = None, config_prefix: Optional[str] = None) -> Dict[str, str]:
+    """gateway + target + interceptor Lambda 를 rgn 에 만든다. 이미 있으면 재사용한다.
 
-    target: websearch=False → MCP server(`TARGET_MCP_ENDPOINT`), True → AWS web-search connector.
-    config.json 에는 us-west-2 는 `gateway_*`, 그 밖의 리전은 `gateway_<region>_*` 로 기록한다."""
-    gw_name = gateway_name(rgn)
+    name: gateway 이름(기본 `gw-<project>-<region>`). target: websearch=False → MCP server(`TARGET_MCP_ENDPOINT`),
+    True → AWS web-search connector. config.json 에는 기본적으로 포털 리전은 `gateway_*`, 그 밖의 리전은 `gateway_<region>_*` 로
+    기록하며, 같은 리전에 gateway 가 둘 이상이면 config_prefix(예: `gateway_websearch_jwt`)로 구분한다."""
+    gw_name = name or gateway_name(rgn)
     jwt: Optional[Dict[str, Any]] = None
     if cognito_jwt:                                  # Cognito 앱 클라이언트가 발급한 토큰만 허용
         cg_info = ensure_cognito()
@@ -538,7 +546,8 @@ def ensure_gateway(rgn: str = region, websearch: bool = False, cognito_jwt: bool
     else:
         for attempt in range(6):
             try:
-                gid = ac.create_gateway(**gateway_params(role, interceptor_arn, gw_name, jwt))["gatewayId"]
+                gid = ac.create_gateway(**gateway_params(role, interceptor_arn, gw_name, jwt,
+                                                       WEBSEARCH_GATEWAY_DESCRIPTION if websearch else None))["gatewayId"]
                 break
             except ClientError as e:
                 if e.response["Error"]["Code"] == "ValidationException" and attempt < 5:
@@ -567,7 +576,7 @@ def ensure_gateway(rgn: str = region, websearch: bool = False, cognito_jwt: bool
         logger.info("Created target: %s → %s", tid, endpoint)
     _wait(lambda: ac.get_gateway_target(gatewayIdentifier=gid, targetId=tid), what="Gateway target")
 
-    p = "gateway" if rgn == region else f"gateway_{rgn.replace('-', '_')}"
+    p = config_prefix or ("gateway" if rgn == region else f"gateway_{rgn.replace('-', '_')}")
     info = {f"{p}_id": gid, f"{p}_arn": cur["gatewayArn"], f"{p}_url": cur.get("gatewayUrl", ""), f"{p}_region": rgn,
             f"{p}_name": gw_name, f"{p}_target_id": tid, f"{p}_interceptor_lambda_arn": interceptor_arn}
     if p == "gateway":                                 # 기존 키 유지
@@ -579,9 +588,13 @@ def ensure_gateway(rgn: str = region, websearch: bool = False, cognito_jwt: bool
 
 
 def ensure_gateways() -> None:
-    """gw-ai-portal-us-west-2 (IAM 인증, MCP server target) 와 gw-ai-portal-us-east-1 (Cognito JWT 인증, web-search target)."""
+    """gw-ai-portal (IAM, MCP server target), gw-ai-portal-websearch-jwt (Cognito JWT, web-search target),
+    gw-ai-portal-websearch-iam (IAM, web-search target)."""
     ensure_gateway(region)
-    ensure_gateway(WEBSEARCH_REGION, websearch=True, cognito_jwt=True)
+    ensure_gateway(WEBSEARCH_REGION, websearch=True, cognito_jwt=True,
+                   name=WEBSEARCH_JWT_GATEWAY_NAME, config_prefix="gateway_websearch_jwt")
+    ensure_gateway(WEBSEARCH_REGION, websearch=True, cognito_jwt=False,
+                   name=WEBSEARCH_IAM_GATEWAY_NAME, config_prefix="gateway_websearch_iam")
 
 
 # ── 1d-2. Cognito (Gateway JWT 인증의 IdP) ──────────────────────────────────

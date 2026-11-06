@@ -7,6 +7,10 @@ from fastapi.testclient import TestClient
 from application import auth, aws, catalog, db, mcp_test, server
 
 
+def _grant(item_id, email="a@x.com"):          # 소유자도 사용 신청이 승인되어야 쓸 수 있다
+    db.put_usage_request(item_id, email, "PENDING"); db.put_usage_request(item_id, email, "APPROVED", decided_by="t")
+
+
 @pytest.fixture
 def env(monkeypatch, tmp_path):
     monkeypatch.setenv("SESSION_SIGNING_KEY", "k")
@@ -87,6 +91,7 @@ def test_skill_chat_access_and_validation(env):
     iid = db.insert_item("skill", "s", "", "a@x.com", {"source_type": "git", "git_url": "https://github.com/o/r"})
     assert client("b@x.com").post(f"/api/skills/{iid}/chat", json=body).status_code == 404       # 남의 승인 전 skill
     mcp = db.insert_item("mcp", "m", "", "a@x.com", {})
+    _grant(mcp)
     assert client("a@x.com").post(f"/api/skills/{mcp}/chat", json=body).status_code == 404       # skill 이 아닌 항목
     bad = {**body, "messages": [{"role": "assistant", "content": "x"}]}
     assert client("a@x.com").post(f"/api/skills/{iid}/chat", json=bad).status_code == 422
@@ -135,5 +140,6 @@ def test_mcp_chat_does_not_install_node(env, monkeypatch):
         def invoke_harness(self, **kw): return {"stream": iter([])}
     monkeypatch.setattr(aws.boto3, "client", lambda *a, **k: RT())
     iid = db.insert_item("mcp", "m", "", "a@x.com", {"endpoint": "https://e/mcp", "headers": []})
+    _grant(iid)
     client("a@x.com").post(f"/api/mcp/{iid}/chat", json={"session_id": "u" * 36, "messages": [{"role": "user", "content": "hi"}]})
     assert calls == []

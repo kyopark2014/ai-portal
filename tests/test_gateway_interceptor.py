@@ -78,8 +78,8 @@ def test_installer_gateway_params_match_the_api_model():
     cg = src[src.index("COGNITO_REGION = "):src.index("def ensure_cognito")]
     exec("project_name='ai-portal'; region='us-west-2'; account_id='123456789012'\nfrom typing import *\nWEBSEARCH_REGION='us-east-1'\n" + consts + gp + cg, ns)
     model = botocore.session.get_session().create_client("bedrock-agentcore-control", region_name="us-west-2").meta.service_model
-    checks = [("CreateGateway", ns["gateway_params"]("arn:aws:iam::1:role/r", "arn:aws:lambda:us-east-1:1:function:f", ns["gateway_name"](r)))
-              for r in ("us-west-2", "us-east-1")]
+    checks = [("CreateGateway", ns["gateway_params"]("arn:aws:iam::1:role/r", "arn:aws:lambda:us-east-1:1:function:f", n))
+              for n in ("gw-ai-portal", "gw-ai-portal-websearch-iam")]
     checks += [("CreateGatewayTarget", ns["target_params"]("gw-1", "https://example.com/mcp", ns["TARGET_NAME"])),
                ("CreateGatewayTarget", ns["websearch_target_params"]("gw-1"))]
     for op, params in checks:
@@ -90,7 +90,7 @@ def test_installer_gateway_params_match_the_api_model():
         ic = g["interceptorConfigurations"][0]
         assert ic["interceptionPoints"] == ["REQUEST", "RESPONSE"] and ic["interceptor"]["lambda"]["arn"].endswith(":function:f")
     # JWT(Cognito) 인증 gateway
-    jwt = ns["gateway_params"]("arn:aws:iam::1:role/r", "arn:aws:lambda:us-east-1:1:function:f", "gw-ai-portal-us-east-1",
+    jwt = ns["gateway_params"]("arn:aws:iam::1:role/r", "arn:aws:lambda:us-east-1:1:function:f", ns["WEBSEARCH_JWT_GATEWAY_NAME"],
                                {"discovery_url": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_X/.well-known/openid-configuration", "client_id": "abc123"})
     rep = ParamValidator().validate(jwt, model.operation_model("CreateGateway").input_shape)
     assert not rep.has_errors(), rep.generate_report()
@@ -116,7 +116,8 @@ def test_installer_gateway_params_match_the_api_model():
     ws = checks[3][1]
     assert ws["targetConfiguration"]["mcp"]["connector"]["source"]["connectorId"] == "web-search"
     assert ws["credentialProviderConfigurations"] == [{"credentialProviderType": "GATEWAY_IAM_ROLE"}]
-    assert [g["name"] for _, g in checks[:2]] == ["gw-ai-portal-us-west-2", "gw-ai-portal-us-east-1"]
+    assert checks[0][1]["name"] == "gw-ai-portal"
+    assert ns["WEBSEARCH_JWT_GATEWAY_NAME"] == "gw-ai-portal-websearch-jwt" and ns["WEBSEARCH_IAM_GATEWAY_NAME"] == "gw-ai-portal-websearch-iam"
     assert ns["INTERCEPTOR_FUNCTION"] == "lambda-ai-portal-intercepter" and ns["WEBSEARCH_REGION"] == "us-east-1"
     # 기존 us-west-2 역할 이름은 바뀌지 않는다(이미 만든 리소스를 재사용해야 한다)
     assert ns["interceptor_role_name"]("us-west-2") == "role-lambda-interceptor-for-ai-portal-us-west-2"
@@ -231,8 +232,10 @@ def test_cognito_group_in_the_token_or_pool_is_irrelevant(lam, aws):
     assert blocked(lam.handler(jreq(jwt(**{"cognito:groups": [f"mcp:{GW_ID}"]})), None))
 
 
-def test_mcp_owner_passes_without_a_request(lam, aws):
-    aws(approved=[], owner=EMAIL)
+def test_mcp_owner_is_blocked_without_an_approval(lam, aws):
+    aws(approved=[], owner=EMAIL)                                           # 소유자도 사용 승인이 있어야 통과한다
+    assert blocked(lam.handler(jreq(jwt()), None))
+    aws(approved=[EMAIL], owner=EMAIL)
     assert not blocked(lam.handler(jreq(jwt()), None))
 
 

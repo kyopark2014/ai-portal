@@ -86,9 +86,11 @@ def test_groups_are_per_gateway_and_per_user(env):
     assert client(USER).get(f"/api/mcp/{b}/token").status_code == 403             # 다른 서버는 따로 승인이 필요하다
 
 
-def test_owner_needs_no_request_admin_does_and_non_gateway_mcp_has_no_token(env):
+def test_owner_and_admin_both_need_approval_and_non_gateway_mcp_has_no_token(env):
     i = gateway_item(); plain = db.insert_item("mcp", "m", "", OWNER, {"endpoint": "https://e/mcp"})
     db.update_item(plain, registry_id="REG", registry_record_id="rec999999", registry_status="APPROVED")
+    assert client(OWNER).get(f"/api/mcp/{i}/token").status_code == 403           # 소유자도 사용 승인이 필요하다
+    db.put_usage_request(i, OWNER, "PENDING"); db.put_usage_request(i, OWNER, "APPROVED", decided_by="t")
     assert client(OWNER).get(f"/api/mcp/{i}/token").status_code == 200
     assert client(ADMIN).get(f"/api/mcp/{i}/token").status_code == 403           # 관리자도 사용 승인이 필요하다
     db.put_usage_request(i, ADMIN, "PENDING"); db.put_usage_request(i, ADMIN, "APPROVED", decided_by="t")
@@ -113,6 +115,7 @@ def test_without_cognito_everything_is_blocked_with_a_reason(monkeypatch, tmp_pa
     monkeypatch.setenv("SESSION_SIGNING_KEY", "k"); monkeypatch.setenv("PORTAL_DB_PATH", str(tmp_path / "t.db"))
     monkeypatch.setenv("ADMIN_EMAILS", ADMIN); monkeypatch.setattr(auth, "_key", None)
     i = gateway_item()
+    db.put_usage_request(i, OWNER, "PENDING"); db.put_usage_request(i, OWNER, "APPROVED", decided_by="t")
     assert client(OWNER).get(f"/api/mcp/{i}/token").status_code == 503
 
 

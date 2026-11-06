@@ -27,8 +27,8 @@ def test_request_only_after_registration_is_complete(env):
     for st in ("DRAFT", "PENDING_APPROVAL", "REJECTED"):
         i = mcp(st, rec=f"rec{st[:4]}12345")
         assert client(USER).post(f"/api/mcp/{i}/usage").status_code == 404                      # 등록이 끝나지 않은 MCP 는 남에게 보이지도 않는다
-        s = client(OWNER).get(f"/api/mcp/{i}/usage").json()                                      # 소유자에게는 '아직 등록 전' 으로 보인다
-        assert s["registered"] is False and s["can_request"] is False and s["can_use"] is True
+        s = client(OWNER).get(f"/api/mcp/{i}/usage").json()                                      # 소유자에게는 '아직 등록 전' 으로 보이고, 소유자도 쓰려면 신청이 필요하다
+        assert s["registered"] is False and s["can_request"] is False and s["can_use"] is False
     ok = mcp("APPROVED")
     s = client(USER).get(f"/api/mcp/{ok}/usage").json()
     assert s["registered"] is True and s["status"] == "NONE" and s["can_request"] is True and s["can_use"] is False
@@ -58,11 +58,14 @@ def test_using_the_mcp_is_blocked_until_approved(env, monkeypatch):
     assert client(USER).post(f"/api/mcp/{i}/test").status_code != 403                           # 승인 후에는 통과(여기서는 네트워크 오류 등 다른 결과)
 
 
-def test_owner_never_needs_to_apply_and_cannot(env):
+def test_owner_must_apply_and_be_approved_like_anyone_else(env):
     i = mcp()
     s = client(OWNER).get(f"/api/mcp/{i}/usage").json()
-    assert s["can_use"] is True and s["can_request"] is False and s["status"] == "OWNER"
-    assert client(OWNER).post(f"/api/mcp/{i}/usage").status_code == 409
+    assert s["can_use"] is False and s["can_request"] is True and s["status"] == "NONE"          # 내가 만들었어도 바로 쓸 수는 없다
+    assert client(OWNER).post(f"/api/mcp/{i}/usage").json()["status"] == "PENDING"
+    client(ADMIN).post(f"/api/usage-requests/{i}/{OWNER}/decision", json={"decision": "APPROVED"})
+    assert client(OWNER).get(f"/api/mcp/{i}/usage").json()["can_use"] is True
+    assert client(OWNER).delete(f"/api/mcp/{i}/usage").json()["can_use"] is False                 # 소유자도 사용 취소할 수 있다
 
 
 def test_admin_applies_and_cancels_like_anyone_else(env):
@@ -147,14 +150,14 @@ def test_cancel_usage_removes_approval_without_consent(env):
     r = client(USER).delete(f"/api/mcp/{i}/usage")                       # 동의 없이 즉시 취소
     assert r.status_code == 200 and r.json()["status"] == "NONE" and r.json()["can_use"] is False
     assert client(USER).delete(f"/api/mcp/{i}/usage").status_code == 404
-    assert client(OWNER).delete(f"/api/mcp/{i}/usage").status_code == 409  # 소유자는 대상 아님
+    assert client(OWNER).delete(f"/api/mcp/{i}/usage").status_code == 404  # 신청 내역이 없으면 취소할 것이 없다
     assert client(USER).post(f"/api/mcp/{i}/usage").json()["status"] == "PENDING"  # 다시 신청 가능
 
 
 def test_card_shows_usable_only_when_the_viewer_may_use_it(env):
     i = mcp()
     def usable(c): return next(x for x in c.get("/api/catalog/mcp").json()["items"] if x["id"] == i).get("usable")
-    assert usable(client(USER)) is False and usable(client(OWNER)) is True and usable(client(ADMIN)) is False
+    assert usable(client(USER)) is False and usable(client(OWNER)) is False and usable(client(ADMIN)) is False
     client(USER).post(f"/api/mcp/{i}/usage"); assert usable(client(USER)) is False
     client(ADMIN).post(f"/api/usage-requests/{i}/{USER}/decision", json={"decision": "APPROVED"}); assert usable(client(USER)) is True
     client(USER).delete(f"/api/mcp/{i}/usage"); assert usable(client(USER)) is False
@@ -235,5 +238,8 @@ def test_agent_usage_request_flow_and_chat_gate(env, monkeypatch):
     assert client(ADMIN).post(f"/api/usage-requests/{i}/{USER}/decision", json={"decision": "APPROVED"}).status_code == 200
     monkeypatch.setattr(agent_test, "_harness_events", lambda *a, **k: iter([{"t": "ok"}]))
     assert client(USER).post(f"/api/agents/{i}/chat", json=body).status_code == 200
-    assert client(OWNER).post(f"/api/agents/{i}/chat", json=body).status_code == 200            # 소유자는 신청 없이
+    assert client(OWNER).post(f"/api/agents/{i}/chat", json=body).status_code == 403            # 소유자도 신청·승인 전에는 대화 불가
+    client(OWNER).post(f"/api/agent/{i}/usage")
+    client(ADMIN).post(f"/api/usage-requests/{i}/{OWNER}/decision", json={"decision": "APPROVED"})
+    assert client(OWNER).post(f"/api/agents/{i}/chat", json=body).status_code == 200
     assert client(USER).delete(f"/api/agent/{i}/usage").json()["status"] == "NONE"

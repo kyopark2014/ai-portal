@@ -142,7 +142,15 @@ def skill_source(item: dict) -> dict:
 
 class Msg(BaseModel):
     role: str = Field(pattern="^(user|assistant)$")
-    content: str = Field(min_length=1, max_length=8000)
+    content: str = Field(max_length=8000)        # 에러·중단으로 비어 버린 assistant 턴은 허용하고 아래에서 걸러낸다
+
+
+def clean_history(msgs: list[Msg]) -> list[dict]:
+    """빈 assistant 턴을 버린다. 그 외 빈 메시지(사용자)는 거절한다."""
+    out = [m.model_dump() for m in msgs if not (m.role == "assistant" and not m.content.strip())]
+    if not out or any(not m["content"].strip() for m in out):
+        raise HTTPException(422, "빈 메시지는 보낼 수 없습니다")
+    return out
 
 
 class McpChatIn(BaseModel):
@@ -222,9 +230,10 @@ def _stream_harness(arn: str, user: auth.User, session_id: str, history: list[di
 
 
 def _prepare(item_id: int, kind: str, body: McpChatIn, user: auth.User) -> tuple[dict, str, list[dict]]:
-    if body.messages[-1].role != "user":
+    history = clean_history(body.messages)
+    if history[-1]["role"] != "user":
         raise HTTPException(422, "마지막 메시지는 user 여야 합니다")
-    if sum(len(m.content) for m in body.messages) > MAX_CHARS:
+    if sum(len(m["content"]) for m in history) > MAX_CHARS:
         raise HTTPException(422, "대화가 너무 깁니다. 새 대화를 시작하세요")
     it = catalog.visible_item(item_id, user, kind)
     from . import usage
@@ -232,7 +241,7 @@ def _prepare(item_id: int, kind: str, body: McpChatIn, user: auth.User) -> tuple
     arn = harness_arn()
     if not arn:
         raise HTTPException(503, "테스트용 harness 가 없습니다. `python installer.py --harness-only` 를 실행하세요")
-    return it, arn, [m.model_dump() for m in body.messages]
+    return it, arn, history
 
 
 @router.post("/mcp/{item_id}/chat")

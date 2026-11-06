@@ -1,8 +1,8 @@
 """MCP·Agent 사용 신청. Registry 의 승인은 'Registry 에 등록해도 되는가' 이고, 사용 신청은 '이 항목을 내가 써도 되는가' 이다.
 
   - 신청은 **등록이 끝난 MCP/Agent**(Registry 상태 APPROVED)에만 할 수 있다.
-  - 승인은 관리자 또는 그 record 의 reviewer 가 한다(등록 승인과 같은 사람들).
-  - 실제로 쓰는 동작(연결 테스트·harness 테스트)은 소유자와 승인을 받은 사람(관리자 포함)만 할 수 있다.
+  - 승인은 관리자 또는 그 record 의 reviewer 가 한다(등록 승인과 같은 사람들). 소유자도 예외 없이 신청해서 승인을 받아야 쓸 수 있다.
+  - 실제로 쓰는 동작(연결 테스트·harness 테스트)은 사용 승인을 받은 사람(소유자·관리자 포함)만 할 수 있다.
     목록과 상세는 등록된 MCP 라면 누구나 볼 수 있다.
   - Auto-review 가 켜져 있으면 신청 즉시 승인된다(사유에 [auto-review] 표시).
 """
@@ -24,10 +24,8 @@ UsageKind = Literal["mcp", "agent"]
 
 
 def usable_since(item: dict, user: auth.User) -> tuple[bool, float | None]:
-    """(사용 가능 여부, 사용 가능해진 시각). 소유자는 시각 없음(등록 시각을 쓴다)."""
+    """(사용 가능 여부, 사용 가능해진 시각). 소유자도 예외 없이 사용 신청이 승인되어야 한다."""
     if item["kind"] not in USAGE_KINDS:
-        return True, None
-    if item["owner"] == user.email:
         return True, None
     r = db.get_usage_request(item["id"], user.email)
     ok = bool(r and r["status"] == "APPROVED")
@@ -72,8 +70,6 @@ def can_use(item: dict, user: auth.User) -> bool:
     """이 사용자가 이 항목을 실제로 호출해도 되는가. MCP·Agent 만 사용 신청이 필요하고 나머지는 지금처럼 열려 있다."""
     if item["kind"] not in USAGE_KINDS:
         return True
-    if item["owner"] == user.email:
-        return True
     r = db.get_usage_request(item["id"], user.email)
     return bool(r and r["status"] == "APPROVED")
 
@@ -89,8 +85,6 @@ def state_for(item: dict, user: auth.User) -> dict:
     if item["kind"] not in USAGE_KINDS:
         return {"applicable": False}
     base = {"applicable": True, "registered": registered, "can_use": can_use(item, user)}
-    if item["owner"] == user.email:
-        return {**base, "status": "OWNER", "can_request": False}
     r = db.get_usage_request(item["id"], user.email)
     return {**base, "status": r["status"] if r else "NONE", "reason": (r or {}).get("reason", ""),
             "can_request": registered and (r is None or r["status"] == "REJECTED")}
@@ -98,10 +92,8 @@ def state_for(item: dict, user: auth.User) -> dict:
 
 @router.delete("/{kind}/{item_id}/usage")
 def cancel_usage(kind: UsageKind, item_id: int, user: auth.User = Depends(auth.current_user)):
-    """사용 취소: 본인의 사용 신청/승인을 동의 없이 지운다(다시 신청하려면 새로 신청). 소유자만 대상이 아니다(관리자도 취소할 수 있다)."""
+    """사용 취소: 본인의 사용 신청/승인을 동의 없이 지운다(다시 신청하려면 새로 신청). 소유자·관리자도 같다."""
     it = _item(item_id, user, kind)
-    if it["owner"] == user.email:
-        raise HTTPException(409, "소유자는 사용 취소 대상이 아닙니다")
     if not db.get_usage_request(it["id"], user.email):
         raise HTTPException(404, "사용 신청 내역이 없습니다")
     db.delete_usage_request(it["id"], user.email)
@@ -131,8 +123,6 @@ def request_usage(kind: UsageKind, item_id: int, user: auth.User = Depends(auth.
     label = _LABEL[kind]
     if it["registry_status"] != "APPROVED":
         raise HTTPException(409, f"등록이 완료된 {label} 에만 사용 신청할 수 있습니다")
-    if it["owner"] == user.email:
-        raise HTTPException(409, "소유자는 신청 없이 사용할 수 있습니다")
     cur = db.get_usage_request(it["id"], user.email)
     if cur and cur["status"] == "PENDING":
         raise HTTPException(409, "이미 사용 신청 중입니다")

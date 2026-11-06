@@ -195,7 +195,7 @@ export const setPolicy = (body: Partial<Pick<Policy, "auto_approval" | "auto_rev
 // ── MCP·Agent 사용 신청 ──
 export interface UsageState {
   applicable: boolean; registered?: boolean; can_use?: boolean; can_request?: boolean;
-  status?: "OWNER" | "NONE" | "PENDING" | "APPROVED" | "REJECTED"; reason?: string;
+  status?: "NONE" | "PENDING" | "APPROVED" | "REJECTED"; reason?: string;
 }
 export interface UsageRequest {
   item_id: number; email: string; status: "PENDING" | "APPROVED" | "REJECTED"; requested_at: number;

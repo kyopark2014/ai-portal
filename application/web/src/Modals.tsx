@@ -167,7 +167,7 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
     return () => { alive = false; clearTimeout(t); };
   }, [item.id, item.registry_record_id, item.registry_status]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const usageAction = needsUsage && usage?.applicable && usage.status !== "OWNER" ? (
+  const usageAction = needsUsage && usage?.applicable ? (
     usage.status === "APPROVED" || usage.status === "PENDING" ? (
       <button type="button" className="btn ghost" disabled={busy}
         onClick={() => setAsk({ title: usage.status === "APPROVED" ? "사용을 취소할까요?" : "사용 신청을 취소할까요?",
@@ -201,7 +201,7 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
           <PromptTest key={item.id + ":" + d.version + ":" + d.text.length} item={item} />
         </>)}
 
-        {needsUsage && usage?.applicable && usage.status !== "OWNER" && (
+        {needsUsage && usage?.applicable && (
           <div role="region" aria-label="사용 신청 상태">
             {usage.status === "APPROVED" ? null
               : usage.status === "PENDING" ? <p className="note" role="status">사용 신청 중입니다. reviewer 가 승인하면 사용할 수 있습니다.</p>
@@ -269,7 +269,7 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
               if ((i.kind === "mcp" || i.kind === "agent") && i.registry_status === "APPROVED") {      // MCP/Agent: 등록 + 사용 신청 상태를 한 문장으로
                 const u = await api.myUsage(i.id, i.kind as api.UsageKind).catch(() => null); if (u) setUsage(u);
                 const st = u?.status;
-                setMsg(st === "APPROVED" || st === "OWNER" ? "등록과 사용신청이 완료되었습니다."
+                setMsg(st === "APPROVED" ? "등록과 사용신청이 완료되었습니다."
                   : st === "PENDING" ? "등록후 사용신청 중입니다." : "등록되었지만 사용 신청은 되지 않았습니다.");
               } else setMsg(i.registry_reason ? `상태 사유: ${i.registry_reason}` : "상태를 갱신했습니다.");
             })}>상태 확인</button>

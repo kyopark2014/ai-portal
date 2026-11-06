@@ -49,7 +49,7 @@ export default function AgentCreate({ user }: { user: api.User }) {
     }).catch((e) => setLoadErr(`모델 목록: ${e.message}`));
     api.listItems("prompt").then(setPrompts).catch(() => {});
     api.listItems("mcp").then((l) => setMcps(l.filter((i) =>
-      (i.usable || i.owner === user.email) && !(i.data.kind === "gateway" && i.data.authorizer === "CUSTOM_JWT")))).catch(() => {});
+      i.usable && !(i.data.kind === "gateway" && i.data.authorizer === "CUSTOM_JWT")))).catch(() => {});
     api.listItems("skill").then(setSkills).catch(() => {});
   }, [user.email]);
 
@@ -127,10 +127,11 @@ export default function AgentCreate({ user }: { user: api.User }) {
       </>)}
 
       {step === 4 && (<>
-        <div className="field"><span className="lbl">인증</span>
-          <label style={{ display: "block", marginBottom: ".35rem" }}><input type="radio" checked={authKind === "IAM"} onChange={() => setAuthKind("IAM")} /> IAM <span className="hint">AWS 자격 증명(SigV4)으로 호출</span></label>
+        <div className="field" style={{ marginBottom: "1.25rem" }}><span className="lbl" style={{ marginBottom: ".4rem" }}>인증</span>
+          <label style={{ display: "block", marginBottom: ".6rem" }}><input type="radio" checked={authKind === "IAM"} onChange={() => setAuthKind("IAM")} /> IAM <span className="hint">AWS 자격 증명(SigV4)으로 호출</span></label>
           <label style={{ display: "block" }}><input type="radio" checked={authKind === "JWT"} onChange={() => setAuthKind("JWT")} /> JWT Tokens <span className="hint">Cognito 가 발급한 토큰으로 호출</span></label>
         </div>
+        <h3 style={{ margin: "0 0 .6rem", paddingTop: "1rem", borderTop: "1px solid var(--line)", fontSize: ".9rem" }}>생성할 에이전트</h3>
         <dl className="kv">
           <div><dt>이름</dt><dd className="mono">{name}</dd></div><div><dt>모델</dt><dd className="mono">{model}</dd></div>
           <div><dt>프롬프트</dt><dd>{mode === "registry" ? prompts.find((p) => p.id === promptId)?.name : text.trim() ? `직접 입력 (${text.trim().length}자)` : "없음"}</dd></div>

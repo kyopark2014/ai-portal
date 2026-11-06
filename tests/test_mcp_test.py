@@ -4,6 +4,10 @@ from fastapi.testclient import TestClient
 from application import auth, aws, catalog, db, mcp_test, server
 
 
+def _grant(item_id, email="a@x.com"):          # 소유자도 사용 신청이 승인되어야 쓸 수 있다
+    db.put_usage_request(item_id, email, "PENDING"); db.put_usage_request(item_id, email, "APPROVED", decided_by="t")
+
+
 @pytest.fixture
 def env(monkeypatch, tmp_path):
     monkeypatch.setenv("SESSION_SIGNING_KEY", "k")
@@ -64,6 +68,7 @@ def test_requires_login_and_validates_input(env):
     assert TestClient(server.app).post("/api/mcp/1/chat", json={}).status_code == 401
     c = client()
     iid = db.insert_item("mcp", "m", "", "a@x.com", {"endpoint": "https://e/mcp", "headers": []})
+    _grant(iid)
     ok = {"session_id": "a" * 36}
     assert c.post(f"/api/mcp/{iid}/chat", json={**ok, "messages": [{"role": "assistant", "content": "x"}]}).status_code == 422
     assert c.post(f"/api/mcp/{iid}/chat", json={"session_id": "short", "messages": [{"role": "user", "content": "x"}]}).status_code == 422
@@ -73,6 +78,7 @@ def test_requires_login_and_validates_input(env):
 def test_missing_harness_gives_actionable_503(env, monkeypatch):
     monkeypatch.delenv("HARNESS_ARN"); monkeypatch.setattr(catalog, "config_value", lambda k: "")
     iid = db.insert_item("mcp", "m", "", "a@x.com", {"endpoint": "https://e/mcp", "headers": []})
+    _grant(iid)
     r = client().post(f"/api/mcp/{iid}/chat", json={"session_id": "a" * 36, "messages": [{"role": "user", "content": "x"}]})
     assert r.status_code == 503 and "--harness-only" in r.json()["detail"]
     assert client().get("/api/mcp/test-status").json()["ready"] is False
@@ -95,6 +101,7 @@ def test_stream_relays_text_and_tool_events_and_scopes_session(env, monkeypatch)
             ])}
     monkeypatch.setattr(aws.boto3, "client", lambda *a, **k: RT())
     iid = db.insert_item("mcp", "m", "", "a@x.com", {"endpoint": "https://e/mcp", "headers": []})
+    _grant(iid)
     db.update_item(iid, registry_status="APPROVED")   # 다른 사용자가 보려면 승인된 항목이어야 한다
     r = client("a@x.com").post(f"/api/mcp/{iid}/chat", json={"session_id": "s" * 36, "messages": [{"role": "user", "content": "go"}]})
     import json
@@ -116,6 +123,7 @@ def test_aws_error_is_reported_as_event(env, monkeypatch):
             raise RuntimeError("boom")
     monkeypatch.setattr(aws.boto3, "client", lambda *a, **k: RT())
     iid = db.insert_item("mcp", "m", "", "a@x.com", {"endpoint": "https://e/mcp", "headers": []})
+    _grant(iid)
     r = client().post(f"/api/mcp/{iid}/chat", json={"session_id": "s" * 36, "messages": [{"role": "user", "content": "go"}]})
     assert r.status_code == 200 and '"error": "boom"' in r.text
 

@@ -62,3 +62,10 @@ else:
             db_dynamo.reset_for_tests(None)
             yield
             db_dynamo.reset_for_tests(None)
+
+
+def grant_use(item_id: int, email: str) -> None:
+    """테스트용: 사용 신청이 승인된 상태로 만든다(소유자도 신청·승인이 필요하다)."""
+    from application import db
+    db.put_usage_request(item_id, email, "PENDING")
+    db.put_usage_request(item_id, email, "APPROVED", decided_by="test")

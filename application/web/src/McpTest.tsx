@@ -51,7 +51,7 @@ export default function McpTest({ item }: { item: Item }) {
     const text = input.trim();
     if (!text || busy) return;
     setErr(""); setInput(""); setBusy(true);
-    const history = [...turns.map(({ role, content }) => ({ role, content })), { role: "user" as const, content: text }];
+    const history = [...turns.filter((t) => t.role === "user" || t.content.trim()).map(({ role, content }) => ({ role, content })), { role: "user" as const, content: text }];   // 에러로 비어 버린 응답은 이력에서 뺀다
     setTurns([...turns, { role: "user", content: text }, { role: "assistant", content: "", parts: [] }]);
     const last = (fn: (t: Turn) => Turn) => setTurns((cur) => cur.map((t, i) => (i === cur.length - 1 ? fn(t) : t)));
     const ctl = new AbortController(); abort.current = ctl;

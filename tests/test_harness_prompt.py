@@ -9,6 +9,10 @@ from application import auth, aws, catalog, db, mcp_test, server
 HN = "arn:aws:bedrock-agentcore:us-west-2:123456789012:harness/ai_portal-X"      # 계정 ID 는 12자리여야 agent ARN 검증을 통과한다
 
 
+def _grant(item_id, email="a@x.com"):          # 소유자도 사용 신청이 승인되어야 쓸 수 있다
+    db.put_usage_request(item_id, email, "PENDING"); db.put_usage_request(item_id, email, "APPROVED", decided_by="t")
+
+
 @pytest.fixture
 def env(monkeypatch, tmp_path):
     monkeypatch.setenv("SESSION_SIGNING_KEY", "k")
@@ -47,6 +51,7 @@ class RT:
 def mcp_chat(c, rt, monkeypatch, **extra):
     monkeypatch.setattr(aws.boto3, "client", lambda *a, **k: rt)
     iid = db.insert_item("mcp", "m", "", "a@x.com", {"endpoint": "https://e/mcp", "headers": []})
+    _grant(iid)
     body = {"session_id": "s" * 36, "messages": [{"role": "user", "content": "hi"}], **extra}
     return c.post(f"/api/mcp/{iid}/chat", json=body)
 
@@ -112,6 +117,7 @@ def test_skill_and_harness_agent_also_use_the_default(env, monkeypatch):
     monkeypatch.setattr(aws.boto3, "client", lambda *a, **k: rt)
     sk = db.insert_item("skill", "docx", "", "a@x.com", {"source_type": "git", "git_url": "https://github.com/o/r"})
     ag = db.insert_item("agent", "ai_portal", "", "a@x.com", {"arn": HN, "agent_type": "harness"})
+    _grant(ag)
     body = {"session_id": "s" * 36, "messages": [{"role": "user", "content": "hi"}]}
     assert client().post(f"/api/skills/{sk}/chat", json=body).status_code == 200
     assert client().post(f"/api/agents/{ag}/chat", json=body).status_code == 200
@@ -126,5 +132,6 @@ def test_runtime_agents_do_not_get_a_system_prompt(env, monkeypatch):
             seen.update(kw); return {"contentType": "application/json", "response": type("B", (), {"read": lambda s: b"{}"})()}
     monkeypatch.setattr(aws.boto3, "client", lambda *a, **k: R())
     ag = db.insert_item("agent", "agentic_work", "", "a@x.com", {"arn": "arn:aws:bedrock-agentcore:us-west-2:123456789012:runtime/agentic_work-A1", "agent_type": "runtime"})
+    _grant(ag)
     client().post(f"/api/agents/{ag}/chat", json={"session_id": "s" * 36, "messages": [{"role": "user", "content": "hi"}]})
     assert "systemPrompt" not in json.dumps(seen, default=str) and "기본 시스템 프롬프트" not in json.dumps(seen, default=str)

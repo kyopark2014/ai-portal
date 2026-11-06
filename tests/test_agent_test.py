@@ -23,8 +23,11 @@ def client(email="a@x.com"):
     return c
 
 
-def agent(data, name="ag"):
-    return db.insert_item("agent", name, "", "a@x.com", data)
+def agent(data, name="ag", grant=True):
+    iid = db.insert_item("agent", name, "", "a@x.com", data)
+    if grant:                                           # 소유자도 사용 신청이 승인되어야 대화할 수 있다
+        db.put_usage_request(iid, "a@x.com", "PENDING"); db.put_usage_request(iid, "a@x.com", "APPROVED", decided_by="t")
+    return iid
 
 
 BODY = {"session_id": "s" * 36, "messages": [{"role": "user", "content": "hi"}]}
@@ -141,3 +144,22 @@ def test_internal_harness_runtimes_are_not_synced(env, monkeypatch):
 def test_jwt_harness_is_not_callable_from_portal(env):
     iid = agent({"arn": HN, "agent_type": "harness", "auth": "JWT"})
     assert client().post(f"/api/agents/{iid}/chat", json=BODY).status_code == 422
+
+
+def test_empty_assistant_turns_are_dropped_and_empty_user_turns_refused(env, monkeypatch):
+    seen = []
+    monkeypatch.setattr(agent_test, "_harness_events", lambda arn, history, *a, **k: (seen.append(history), iter([{"t": "ok"}]))[1])
+    monkeypatch.setattr(aws, "get_harness", lambda hid: {"status": "READY"})
+    iid = agent({"arn": HN, "agent_type": "harness"})
+    msgs = [{"role": "user", "content": "q1"}, {"role": "assistant", "content": ""}, {"role": "user", "content": "q2"}]
+    assert client().post(f"/api/agents/{iid}/chat", json={**BODY, "messages": msgs}).status_code == 200
+    assert [m["content"] for m in seen[0]] == ["q1", "q2"]                       # 에러로 빈 응답은 이력에서 빠진다
+    bad = [{"role": "user", "content": " "}]
+    assert client().post(f"/api/agents/{iid}/chat", json={**BODY, "messages": bad}).status_code == 422
+
+
+def test_harness_still_creating_gives_a_clear_409(env, monkeypatch):
+    monkeypatch.setattr(aws, "get_harness", lambda hid: {"status": "CREATING"})
+    iid = agent({"arn": HN, "agent_type": "harness"})
+    r = client().post(f"/api/agents/{iid}/chat", json=BODY)
+    assert r.status_code == 409 and "준비되지 않았습니다" in r.json()["detail"]

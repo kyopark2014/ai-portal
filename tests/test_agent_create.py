@@ -4,6 +4,10 @@ from fastapi.testclient import TestClient
 from application import agent_create, auth, aws, catalog, db, gateway, mcp_token, server
 
 
+def _grant(item_id, email="a@x.com"):          # 소유자도 사용 신청이 승인되어야 쓸 수 있다
+    db.put_usage_request(item_id, email, "PENDING"); db.put_usage_request(item_id, email, "APPROVED", decided_by="t")
+
+
 @pytest.fixture
 def env(monkeypatch, tmp_path):
     monkeypatch.setenv("SESSION_SIGNING_KEY", "k")
@@ -60,6 +64,7 @@ def test_unusable_model_and_duplicate(env):
 
 def test_mcp_and_skill_selected(env):
     mid = db.insert_item("mcp", "srv", "", "a@x.com", {"endpoint": "https://e.example/mcp"})
+    _grant(mid)
     sid = db.insert_item("skill", "sk", "", "a@x.com", {"source_type": "s3", "s3_uri": "s3://b/p"})
     assert post(client(), mcp_ids=[mid], skill_ids=[sid]).status_code == 200
     kw = env[0]
@@ -74,6 +79,7 @@ def test_mcp_without_usage_approval_is_refused(env):
 
 def test_jwt_gateway_mcp_refused_and_jwt_auth(env, monkeypatch):
     mid = db.insert_item("mcp", "gw", "", "a@x.com", {"kind": "gateway", "authorizer": "CUSTOM_JWT", "gateway_id": "g1", "endpoint": "https://g"})
+    _grant(mid)
     assert post(client(), mcp_ids=[mid]).status_code == 422
     assert post(client(), auth="JWT").status_code == 503              # Cognito 미설치
     monkeypatch.setattr(mcp_token, "settings", lambda: {"pool": "p1", "client": "c1", "region": "us-east-1"})
