@@ -3,6 +3,11 @@
 AWS Agent Registry(Amazon Bedrock AgentCore)의 기능을 UI와 함께 보여주는 웹.
 Prompt · MCP · Agent · Skill 을 카탈로그로 탐색·등록하고, 등록 정보는 Agent Registry 로 관리합니다.
 
+전체적인 architecture는 아래와 같습니다.
+
+<img width="1035" height="535" alt="image" src="https://github.com/user-attachments/assets/3def1f53-88aa-4694-805d-e4c6dc7f2d13" />
+
+
 - 구조: FastAPI REST(`/api/*`) + React(Vite) SPA, 한 컨테이너(:8501)로 ECS 배포 (agentic-work 방식)
 - 로그인: Google. 관리자는 `ADMIN_EMAILS`(기본 `e2npark@gmail.com`), 그 외 로그인 사용자는 일반 사용자
 - 저장소: **DynamoDB**(배포·로컬 공통 — 재배포해도 유지되고, 로컬에서도 서버와 같은 데이터가 보임) — 목록·설명·Registry 연결·등록자·로그인 기록. SQLite 는 **테스트에서만** 씁니다.
