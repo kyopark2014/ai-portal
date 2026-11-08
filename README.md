@@ -273,6 +273,22 @@ cp .env.example .env     # GOOGLE_CLIENT_ID, LLM_GATEWAY_KEY 등 입력
 - **가시성**: 관리자는 모든 항목을 봅니다. **일반 사용자는 자기가 만든 항목과 Registry 에서 승인(APPROVED)된 항목만** 봅니다(거절·deprecated 된 남의 항목은 숨김, 내가 만든 항목은 상태와 무관하게 보임). 목록·검색뿐 아니라 ID 로 접근하는 모든 API(수정·삭제·등록·테스트 등)에 같은 규칙을 적용하며, 숨겨진 항목은 403 이 아니라 404 로 응답해 존재 여부를 알리지 않습니다. 승인된 남의 항목은 보고 테스트에 쓸 수 있지만 수정·삭제는 불가.
 - **권한**: 수정·삭제·등록은 소유자 또는 관리자.
 
+## Agent의 생성
+
+포털 UI의 **에이전트 생성** 마법사는 `POST /api/agents/create`(`application/agent_create.py`의 `create`)로 AgentCore **harness** 를 만듭니다. 처리 순서는 다음과 같습니다.
+
+1. **이름 검사** — `harnessName` 규칙과 동일하게 영문으로 시작하고 `a-z A-Z 0-9 _` 만, 최대 40자(`NAME_RE`). 아니면 422.
+2. **모델 검사** — `bedrock_models()`(Gateway 모델 목록 중 사용 가능한 Bedrock Claude, `global.anthropic.*` / `us.anthropic.*`)에 없으면 422. Gateway 조회 실패 시 502.
+3. **시스템 프롬프트** — `prompt_id` 가 있으면 `catalog.harness_system_prompt` 로 보이는 prompt 만 읽고(본문은 Prompt Management), 없으면 `system_prompt` 문자열을 `[{"text": …}]` 로 넣거나 비어 있으면 생략.
+4. **MCP·Skill·인증** — `_tools(mcp_ids)`(사용 신청 승인된 MCP만, JWT Gateway 는 422)·`_skills(skill_ids)`·`auth == "JWT"` 이면 Cognito 기반 `_authorizer()`(`customJWTAuthorizer`).
+5. **이름 중복** — 포털 DB에 같은 이름 agent 가 있으면 409.
+6. **`create_harness`** — `bedrock-agentcore-control` 에 다음을 보냅니다.
+   - 필수: `harnessName`, `executionRoleArn`(`role_arn()` — installer 의 `role-harness-for-ai-portal-<region>` 또는 `HARNESS_ROLE_ARN`), `clientToken`(UUID), `model.bedrockModelConfig`(선택한 모델, `maxTokens` 4096), `maxIterations` 10 · `maxTokens` 8192 · `timeoutSeconds` 300, tags `Project=ai-portal` / `Owner=portal`
+   - 선택: `systemPrompt`, `tools`, `skills`, `authorizerConfiguration`
+7. **포털 DB 저장** — `agent_type=harness`, ARN·상태·모델·auth·mcp/skill id 를 `data` 에 넣고 `ext_id=harness:<harnessId>` 로 항목을 만듭니다. description 을 넣었으면 `desc_edited=1` 로 표시해 이후 동기화가 설명을 덮지 않게 합니다.
+
+생성 직후 상태는 보통 `CREATING` 이며, 상세 화면에서 Registry 등록·승인 요청을 이어 갈 수 있습니다. UI·모델·MCP 제약의 배경은 위 [기능](#기능)의 **에이전트 생성 탭** 을 참고하세요.
+
 ## AWS 리소스 (`installer.py`)
 ```bash
 python installer.py --registry-only        # Registry `ai-portal` 만
