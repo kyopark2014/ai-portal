@@ -62,8 +62,9 @@ def _portal_item(record_id: str) -> dict | None:
 
 
 def _summary(r: dict) -> dict:
-    return {"recordId": r["recordId"], "name": r["name"], "description": r.get("description", ""),
-            "descriptorType": r["descriptorType"], "status": r["status"], "recordVersion": r.get("recordVersion", ""),
+    return {"recordId": r["recordId"], "name": r.get("displayName") or r["name"],
+            "description": r.get("description", ""),
+            "recordType": r["recordType"], "status": r["status"], "recordVersion": r.get("recordVersion", ""),
             "createdAt": _iso(r.get("createdAt")), "updatedAt": _iso(r.get("updatedAt"))}
 
 
@@ -74,7 +75,8 @@ def queue(status: Literal["PENDING_APPROVAL", "APPROVED", "REJECTED", "DEPRECATE
     try:
         while True:
             r = aws.registry_client().list_registry_records(
-                registryId=rid, status=status, **({"nextToken": token} if token else {}))
+                registryId=rid, filters=[{"name": "status", "values": [status]}],
+                **({"nextToken": token} if token else {}))
             out += r.get("registryRecords", [])
             token = r.get("nextToken")
             if not token:
@@ -102,10 +104,11 @@ def detail(record_id: str, user: auth.User = Depends(require_admin)):
         raise catalog.aws_err(e)
     content: Any = None
     d = r.get("descriptors") or {}
-    inline = ((d.get("custom") or {}).get("inlineContent")
-              or ((d.get("mcp") or {}).get("server") or {}).get("inlineContent")
-              or ((d.get("a2a") or {}).get("agentCard") or {}).get("inlineContent")
-              or ((d.get("agentSkills") or {}).get("skillMd") or {}).get("inlineContent"))
+    inline = ((d.get("custom") or {}).get("data")
+              or (d.get("mcpServer") or {}).get("data")
+              or (d.get("a2aAgentCard") or {}).get("data")
+              or (((d.get("agentSkillsDefinition") or {}).get("additionalData") or {}).get("skillMd") or {}).get("data")
+              or (d.get("agentSkillsDefinition") or {}).get("data"))
     if inline:
         try:
             content = json.loads(inline)
@@ -229,7 +232,7 @@ def remove_admin(email: str, user: auth.User = Depends(require_admin)):
 
 # ── 관리자 대시보드: 접속한 사람 + 레지스트리 등록 현황 ─────────────────────────
 dashboard_router = APIRouter(prefix="/api/admin")
-_DESCRIPTOR_KIND = {"MCP": "mcp", "A2A": "agent", "AGENT_SKILLS": "skill", "CUSTOM": "prompt"}
+_RECORD_KIND = {"MCP": "mcp", "AGENT": "agent", "SKILL": "skill", "CUSTOM": "prompt", "GATEWAY": "mcp"}
 
 
 @dashboard_router.get("/dashboard")
@@ -251,7 +254,8 @@ def dashboard(user: auth.User = Depends(require_admin)):
         while True:
             r = aws.registry_client().list_registry_records(registryId=rid, **({"nextToken": token} if token else {}))
             for rec in r.get("registryRecords", []):
-                kind = _DESCRIPTOR_KIND.get(rec["descriptorType"], rec["descriptorType"].lower())
+                rt = rec.get("recordType", "")
+                kind = _RECORD_KIND.get(rt, rt.lower())
                 by_type.setdefault(kind, {})
                 by_type[kind][rec["status"]] = by_type[kind].get(rec["status"], 0) + 1
             token = r.get("nextToken")

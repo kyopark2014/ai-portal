@@ -67,9 +67,9 @@ def test_dashboard_shows_users_with_per_type_and_per_status_counts(env, monkeypa
     mk("prompt", "p1", USER, "APPROVED"); mk("prompt", "p2", USER, "PENDING_APPROVAL"); mk("mcp", "m1", USER, "REJECTED")
     mk("skill", "s1", OTHER, None); mk("agent", "a1", "registry", "APPROVED")
     monkeypatch.setattr(aws, "registry_client", lambda: Reg([
-        {"descriptorType": "CUSTOM", "status": "APPROVED"}, {"descriptorType": "CUSTOM", "status": "PENDING_APPROVAL"},
-        {"descriptorType": "MCP", "status": "REJECTED"}, {"descriptorType": "AGENT_SKILLS", "status": "APPROVED"},
-        {"descriptorType": "A2A", "status": "DRAFT"}]))
+        {"recordType": "CUSTOM", "status": "APPROVED"}, {"recordType": "CUSTOM", "status": "PENDING_APPROVAL"},
+        {"recordType": "MCP", "status": "REJECTED"}, {"recordType": "SKILL", "status": "APPROVED"},
+        {"recordType": "AGENT", "status": "DRAFT"}]))
     d = client(ADMIN).get("/api/admin/dashboard").json()
     assert d["totals"]["unique_users"] == 2 and d["totals"]["total_logins"] == 3
     u = {x["email"]: x for x in d["users"]}
@@ -137,7 +137,9 @@ def test_registry_info_is_read_only_and_reports_the_fixed_registry(env, monkeypa
     class C:
         def get_registry(self, registryId):
             assert registryId == "REG"
-            return {"name": "ai-portal", "status": "READY", "authorizerType": "AWS_IAM", "approvalConfiguration": {"autoApproval": False}}
+            return {"name": "ai-portal", "status": "READY",
+                    "discoveryConfiguration": {"authorizerType": "AWS_IAM"},
+                    "approvalConfiguration": {"autoApprovalRules": []}}
     monkeypatch.setattr(aws, "registry_client", lambda: C())
     r = client(USER).get("/api/registry").json()
     assert r == {"registry_id": "REG", "name": "ai-portal", "status": "READY", "authorizer": "AWS_IAM", "auto_approval": False}

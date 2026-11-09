@@ -453,7 +453,7 @@ def _sync_gateways() -> int:
     return n
 
 
-_KIND_OF = {"MCP": "mcp", "A2A": "agent", "AGENT_SKILLS": "skill", "CUSTOM": "prompt"}
+_KIND_OF = {"MCP": "mcp", "AGENT": "agent", "SKILL": "skill", "CUSTOM": "prompt", "GATEWAY": "mcp"}
 
 
 def _loads(v: str | None) -> dict:
@@ -469,30 +469,31 @@ def _item_from_record(rec: dict) -> tuple[str, dict] | None:
 
     복원 가능한 것만 복원한다: prompt(Prompt Management 포인터), skill(Git/S3 출처), agent(ARN), MCP(URL).
     MCP 의 HTTP 헤더(인증 정보)는 Registry 에 저장하지 않으므로 복원되지 않는다.
+    agent-registry 스키마: recordType + descriptors.*.data.
     """
-    kind = _KIND_OF.get(rec.get("descriptorType", ""))
+    kind = _KIND_OF.get(rec.get("recordType", ""))
     d = rec.get("descriptors") or {}
     if kind == "prompt":
-        c = _loads((d.get("custom") or {}).get("inlineContent"))
+        c = _loads((d.get("custom") or {}).get("data"))
         if c.get("type") != "bedrock-prompt" or not c.get("promptId"):
             return None
         return "prompt", {"prompt_id": c["promptId"], "arn": c.get("promptArn", ""), "version": c.get("version", "DRAFT"),
                           "model_id": c.get("modelId", ""), "variables": c.get("variables", []), "text": ""}
     if kind == "skill":
-        sd = _loads(((d.get("agentSkills") or {}).get("skillDefinition") or {}).get("inlineContent"))
+        sd = _loads((d.get("agentSkillsDefinition") or {}).get("data"))
         src = sd.get("source") or {}
         if not src:
             return None
         label = src.get("git_url") or src.get("s3_uri") or ""
         return "skill", {**{k: v for k, v in src.items() if v != ""}, "source_label": label}
     if kind == "agent":
-        card = _loads(((d.get("a2a") or {}).get("agentCard") or {}).get("inlineContent"))
+        card = _loads((d.get("a2aAgentCard") or {}).get("data"))
         arn = card.get("url", "")
         if not arn.startswith("arn:aws:bedrock-agentcore:"):
             return None                                   # 포털이 만든 card 는 url 에 ARN 을 넣는다
         return "agent", {"agent_type": "harness" if ":harness/" in arn else "runtime", "arn": arn}
     if kind == "mcp":
-        sv = _loads(((d.get("mcp") or {}).get("server") or {}).get("inlineContent"))
+        sv = _loads((d.get("mcpServer") or {}).get("data"))
         url = ((sv.get("remotes") or [{}])[0]).get("url", "")
         return "mcp", {"endpoint": url, "headers": [], "kind": "registry"}
     return None
@@ -555,7 +556,8 @@ def sync_registry() -> dict[str, int]:
             db.update_item(target["id"], registry_id=rid, registry_record_id=r["recordId"], registry_status=r["status"])
             linked += 1
             continue
-        iid = db.insert_item(kind, full["name"], full.get("description", ""), "registry", data, "registry",
+        display = full.get("displayName") or full["name"]
+        iid = db.insert_item(kind, display, full.get("description", ""), "registry", data, "registry",
                              f"registry:{r['recordId']}")
         db.update_item(iid, registry_id=rid, registry_record_id=r["recordId"], registry_status=r["status"], desc_edited=1)
         created += 1
@@ -654,9 +656,10 @@ def registry_info(user: auth.User = Depends(auth.current_user)):
         g = aws.registry_client().get_registry(registryId=rid)
     except (ClientError, BotoCoreError) as e:
         raise aws_err(e)
+    rules = (g.get("approvalConfiguration") or {}).get("autoApprovalRules") or []
     return {"registry_id": rid, "name": g.get("name", ""), "status": g.get("status", ""),
-            "authorizer": g.get("authorizerType", ""),
-            "auto_approval": (g.get("approvalConfiguration") or {}).get("autoApproval")}
+            "authorizer": (g.get("discoveryConfiguration") or {}).get("authorizerType", ""),
+            "auto_approval": "APPROVE_ALL" in rules}
 
 
 def _register_core(item_id: int) -> None:

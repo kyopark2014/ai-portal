@@ -23,7 +23,8 @@ class SSM:
 class Reg:
     def __init__(self): self.status, self.updates, self.submits, self.fail_update = "DRAFT", [], 0, False
     def get_registry_record(self, registryId, recordId):
-        return {"recordId": recordId, "name": "n", "description": "", "descriptorType": "CUSTOM", "status": self.status, "recordVersion": "1", "statusReason": "", "descriptors": {}}
+        return {"recordId": recordId, "name": "n", "displayName": "n", "description": "", "recordType": "CUSTOM",
+                "status": self.status, "recordVersion": "1", "statusReason": "", "descriptors": {}}
     def submit_registry_record_for_approval(self, registryId, recordId):
         self.submits += 1; self.status = "PENDING_APPROVAL"; return {"status": "PENDING_APPROVAL"}
     def update_registry_record_status(self, registryId, recordId, status, statusReason):

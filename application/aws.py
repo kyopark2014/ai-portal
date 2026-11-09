@@ -99,13 +99,34 @@ def create_prompt_version(prompt_id: str, description: str = "") -> dict:
     return client("bedrock-agent").create_prompt_version(**kw)
 
 
+def _opt(v: Any) -> dict:
+    """UpdateRegistryRecord 의 optional 필드 래퍼."""
+    return {"optionalValue": v}
+
+
+def _wrap_update_descriptors(descriptors: dict) -> dict:
+    """Create 형태 descriptors → UpdateRegistryRecord optionalValue 래핑."""
+    out: dict[str, Any] = {}
+    for key, val in descriptors.items():
+        if key in ("custom", "mcpServer", "a2aAgentCard"):
+            out[key] = _opt({"data": _opt(val["data"])})
+        elif key == "agentSkillsDefinition":
+            inner: dict[str, Any] = {"data": _opt(val["data"])}
+            md = (val.get("additionalData") or {}).get("skillMd") or {}
+            if md.get("data") is not None:
+                inner["additionalData"] = _opt({"skillMd": _opt({"data": _opt(md["data"])})})
+            out[key] = _opt(inner)
+    return _opt(out)
+
+
 def update_record(registry_id: str, record_id: str, item: dict) -> dict:
     p = record_params(item)
-    return client("bedrock-agentcore-control").update_registry_record(
+    desc = {"custom": p["descriptors"]["custom"]} if item["kind"] == "prompt" else p["descriptors"]
+    return registry_client().update_registry_record(
         registryId=registry_id, recordId=record_id, name=slug(item["name"]),
-        description=(item["description"] or item["name"])[:4096], **{
-            "descriptors": {"custom": {"inlineContent": p["descriptors"]["custom"]["inlineContent"]}}
-            if item["kind"] == "prompt" else p["descriptors"]})
+        displayName=_opt(item["name"]),
+        description=_opt((item["description"] or item["name"])[:4096]),
+        recordType=p["recordType"], descriptors=_wrap_update_descriptors(desc))
 
 
 def delete_prompt(prompt_id: str) -> None:
@@ -189,27 +210,27 @@ def slug(name: str, maxlen: int = 64) -> str:
 
 
 def skill_slug(name: str) -> str:
-    """AGENT_SKILLS 의 name 규칙: 소문자/숫자/하이픈 1-64자, 하이픈으로 시작·끝 금지, 연속 하이픈 금지."""
+    """SKILL record 의 name 규칙: 소문자/숫자/하이픈 1-64자, 하이픈으로 시작·끝 금지, 연속 하이픈 금지."""
     s = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     return (s[:64].strip("-")) or "skill"
 
 
 def record_params(item: dict) -> dict:
-    """포털 항목 → CreateRegistryRecord 의 (descriptorType, descriptors)."""
+    """포털 항목 → CreateRegistryRecord 의 (recordType, descriptors). agent-registry 스키마."""
     k, d = item["kind"], item["data"]
     name, desc = item["name"], item["description"] or item["name"]
     if k == "mcp":
         server = {"name": f"io.portal/{re.sub(r'[^A-Za-z0-9._-]+', '-', name).strip('-') or 'mcp'}",
                   "description": desc, "version": "1.0.0",
                   "remotes": [{"type": "streamable-http", "url": d["endpoint"]}]}
-        return {"descriptorType": "MCP", "descriptors": {"mcp": {"server": {"inlineContent": json.dumps(server)}}}}
+        return {"recordType": "MCP", "descriptors": {"mcpServer": {"data": json.dumps(server)}}}
     if k == "agent":
         card = {"protocolVersion": "0.3.0", "name": name, "description": desc,
                 "url": d.get("invoke_url") or d.get("arn") or "https://example.invalid/",
                 "version": "1.0.0", "capabilities": {},
                 "defaultInputModes": ["text"], "defaultOutputModes": ["text"],
                 "skills": [{"id": slug(name), "name": name, "description": desc, "tags": [d.get("agent_type", "agent")]}]}
-        return {"descriptorType": "A2A", "descriptors": {"a2a": {"agentCard": {"inlineContent": json.dumps(card)}}}}
+        return {"recordType": "AGENT", "descriptors": {"a2aAgentCard": {"data": json.dumps(card)}}}
     if k == "skill":
         # SKILL.md frontmatter 는 YAML 이다. 설명에 ':' '#' 줄바꿈 등이 있으면 따옴표 없이는 깨지므로(예: "GIT skill: https://…")
         # JSON 문자열(= 유효한 YAML 큰따옴표 문자열)로 감싼다. AWS 한도: description 1024자.
@@ -217,26 +238,27 @@ def record_params(item: dict) -> dict:
         md = f"---\nname: {json.dumps(skill_slug(name))}\ndescription: {fm_desc}\n---\n\n# {name}\n\n{desc}\n\nSource: {d.get('source_label', '')}\n"
         definition = {"name": name, "description": desc[:1024], "source": {k2: v for k2, v in d.items()
                       if k2 in ("source_type", "git_url", "subdirectory", "s3_uri", "object_version")}}
-        return {"descriptorType": "AGENT_SKILLS", "descriptors": {"agentSkills": {
-            "skillMd": {"inlineContent": md}, "skillDefinition": {"inlineContent": json.dumps(definition)}}}}
+        return {"recordType": "SKILL", "descriptors": {"agentSkillsDefinition": {
+            "data": json.dumps(definition), "additionalData": {"skillMd": {"data": md}}}}}
     if k == "prompt":
         # 본문은 Prompt Management 에만 있다. Registry 는 불변 버전을 가리키는 포인터만 가진다.
         body = {"type": "bedrock-prompt", "promptId": d["prompt_id"], "promptArn": d["arn"],
                 "version": d["version"], "versionArn": f"{d['arn']}:{d['version']}",
                 "modelId": d.get("model_id", ""), "variables": d.get("variables", [])}
-        return {"descriptorType": "CUSTOM", "descriptors": {"custom": {"inlineContent": json.dumps(body)}}}
+        return {"recordType": "CUSTOM", "descriptors": {"custom": {"data": json.dumps(body)}}}
     raise ValueError(k)
 
 
 def create_record(registry_id: str, item: dict) -> dict:
     p = record_params(item)
-    return client("bedrock-agentcore-control").create_registry_record(
-        registryId=registry_id, name=slug(item["name"]), description=(item["description"] or item["name"])[:4096],
-        recordVersion="1.0", **p)
+    return registry_client().create_registry_record(
+        registryId=registry_id, name=slug(item["name"]), displayName=item["name"],
+        description=(item["description"] or item["name"])[:4096], recordVersion="1.0", **p)
 
 
 def registry_client():
-    return client("bedrock-agentcore-control")
+    """AWS Agent Registry control plane (agent-registry 네임스페이스)."""
+    return client("agent-registry-control")
 
 
 def record_id_from_arn(arn: str) -> Optional[str]:

@@ -19,19 +19,19 @@ def env(monkeypatch, tmp_path):
 
 
 def rec(rid, typ, name, status, **descriptors):
-    return {"recordId": rid, "name": name, "description": f"desc-{name}", "descriptorType": typ, "status": status,
-            "descriptors": descriptors}
+    return {"recordId": rid, "name": name, "displayName": name, "description": f"desc-{name}",
+            "recordType": typ, "status": status, "descriptors": descriptors}
 
 
 def j(o): return json.dumps(o)
 
 
-PROMPT = rec("r1", "CUSTOM", "basic_prompt", "APPROVED", custom={"inlineContent": j(
+PROMPT = rec("r1", "CUSTOM", "basic_prompt", "APPROVED", custom={"data": j(
     {"type": "bedrock-prompt", "promptId": "P1", "promptArn": "arn:p/P1", "version": "3", "modelId": "m", "variables": ["x"]})})
-SKILL = rec("r2", "AGENT_SKILLS", "docx", "APPROVED", agentSkills={"skillDefinition": {"inlineContent": j(
-    {"name": "docx", "source": {"source_type": "git", "git_url": "https://github.com/o/r/tree/main/s", "subdirectory": "", "s3_uri": ""}})}})
-AGENT = rec("r3", "A2A", "ai_portal", "APPROVED", a2a={"agentCard": {"inlineContent": j({"name": "ai_portal", "url": ARN_H})}})
-MCP = rec("r4", "MCP", "gw", "APPROVED", mcp={"server": {"inlineContent": j({"remotes": [{"type": "streamable-http", "url": "https://gw.example/mcp"}]})}})
+SKILL = rec("r2", "SKILL", "docx", "APPROVED", agentSkillsDefinition={"data": j(
+    {"name": "docx", "source": {"source_type": "git", "git_url": "https://github.com/o/r/tree/main/s", "subdirectory": "", "s3_uri": ""}})})
+AGENT = rec("r3", "AGENT", "ai_portal", "APPROVED", a2aAgentCard={"data": j({"name": "ai_portal", "url": ARN_H})})
+MCP = rec("r4", "MCP", "gw", "APPROVED", mcpServer={"data": j({"remotes": [{"type": "streamable-http", "url": "https://gw.example/mcp"}]})})
 
 
 class Reg:
@@ -84,7 +84,7 @@ def test_is_idempotent_and_follows_status_changes(env, monkeypatch):
 def test_owner_edits_survive_and_in_flight_records_are_skipped(env, monkeypatch):
     i = db.insert_item("prompt", "mine", "내 설명", "a@x.com", {"prompt_id": "P9"})
     db.update_item(i, registry_id="REG", registry_record_id="r1", registry_status="PENDING_APPROVAL")
-    creating = rec("r5", "CUSTOM", "new", "CREATING", custom={"inlineContent": j({"type": "bedrock-prompt", "promptId": "P5"})})
+    creating = rec("r5", "CUSTOM", "new", "CREATING", custom={"data": j({"type": "bedrock-prompt", "promptId": "P5"})})
     use(monkeypatch, PROMPT, creating)
     catalog.sync_registry()
     mine = db.get_item(i)
@@ -93,10 +93,10 @@ def test_owner_edits_survive_and_in_flight_records_are_skipped(env, monkeypatch)
 
 
 def test_unrestorable_records_are_ignored(env, monkeypatch):
-    junk = [rec("x1", "CUSTOM", "foreign", "APPROVED", custom={"inlineContent": "not json"}),
-            rec("x2", "CUSTOM", "other", "APPROVED", custom={"inlineContent": j({"type": "something-else"})}),
-            rec("x3", "A2A", "ext", "APPROVED", a2a={"agentCard": {"inlineContent": j({"url": "https://example.com/agent"})}}),
-            rec("x4", "AGENT_SKILLS", "nosrc", "APPROVED", agentSkills={"skillDefinition": {"inlineContent": "{}"}})]
+    junk = [rec("x1", "CUSTOM", "foreign", "APPROVED", custom={"data": "not json"}),
+            rec("x2", "CUSTOM", "other", "APPROVED", custom={"data": j({"type": "something-else"})}),
+            rec("x3", "AGENT", "ext", "APPROVED", a2aAgentCard={"data": j({"url": "https://example.com/agent"})}),
+            rec("x4", "SKILL", "nosrc", "APPROVED", agentSkillsDefinition={"data": "{}"})]
     use(monkeypatch, *junk)
     assert catalog.sync_registry() == {"linked": 0, "created": 0, "updated": 0}
     assert all(db.list_items(k) == [] for k in ("prompt", "agent", "skill", "mcp"))
@@ -116,7 +116,7 @@ def test_registry_failure_changes_nothing_and_does_not_break_full_sync(env, monk
 
 
 def test_restored_items_obey_visibility_rules(env, monkeypatch):
-    use(monkeypatch, PROMPT, rec("r6", "CUSTOM", "draft_p", "DRAFT", custom={"inlineContent": j({"type": "bedrock-prompt", "promptId": "P6"})}))
+    use(monkeypatch, PROMPT, rec("r6", "CUSTOM", "draft_p", "DRAFT", custom={"data": j({"type": "bedrock-prompt", "promptId": "P6"})}))
     catalog.sync_registry()
     c = TestClient(server.app)
     c.cookies.set(auth.COOKIE_NAME, auth.make_session("user@x.com", "U", ""))

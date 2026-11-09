@@ -84,7 +84,7 @@ def test_prompt_from_get_chat_and_record_params():
     for kind, data in (("mcp", {"endpoint": "https://e/mcp"}), ("agent", {"agent_type": "runtime"}),
                        ("skill", {"source_type": "git"}), ("prompt", {"text": "t", "prompt_id": "P", "arn": "a", "version": "1"})):
         out = aws.record_params({"kind": kind, "name": "n", "description": "d", "data": data})
-        assert out["descriptorType"] in ("MCP", "A2A", "AGENT_SKILLS", "CUSTOM")
+        assert out["recordType"] in ("MCP", "AGENT", "SKILL", "CUSTOM")
 
 
 def test_prompt_registry_record_is_pointer_only():
@@ -92,28 +92,8 @@ def test_prompt_registry_record_is_pointer_only():
     out = aws.record_params({"kind": "prompt", "name": "n", "description": "d", "data": {
         "prompt_id": "P1", "arn": "arn:aws:bedrock:r:1:prompt/P1", "version": "3", "text": "SECRET BODY {{x}}",
         "model_id": "m", "variables": ["x"]}})
-    body = json.loads(out["descriptors"]["custom"]["inlineContent"])
-    assert out["descriptorType"] == "CUSTOM" and body["version"] == "3"
-    assert body["versionArn"] == "arn:aws:bedrock:r:1:prompt/P1:3" and "SECRET BODY" not in json.dumps(body)
-
-
-def test_prompt_from_get_chat_and_record_params():
-    p = {"id": "i", "arn": "a", "defaultVariant": "v", "variants": [{"name": "v", "templateConfiguration": {
-        "chat": {"system": [{"text": "sys"}], "messages": [{"content": [{"text": "hello {{x}}"}]}]}}}]}
-    assert aws.prompt_from_get(p)["variables"] == ["x"]
-    for kind, data in (("mcp", {"endpoint": "https://e/mcp"}), ("agent", {"agent_type": "runtime"}),
-                       ("skill", {"source_type": "git"}), ("prompt", {"text": "t", "prompt_id": "P", "arn": "a", "version": "1"})):
-        out = aws.record_params({"kind": kind, "name": "n", "description": "d", "data": data})
-        assert out["descriptorType"] in ("MCP", "A2A", "AGENT_SKILLS", "CUSTOM")
-
-
-def test_prompt_registry_record_is_pointer_only():
-    import json
-    out = aws.record_params({"kind": "prompt", "name": "n", "description": "d", "data": {
-        "prompt_id": "P1", "arn": "arn:aws:bedrock:r:1:prompt/P1", "version": "3", "text": "SECRET BODY {{x}}",
-        "model_id": "m", "variables": ["x"]}})
-    body = json.loads(out["descriptors"]["custom"]["inlineContent"])
-    assert out["descriptorType"] == "CUSTOM" and body["version"] == "3"
+    body = json.loads(out["descriptors"]["custom"]["data"])
+    assert out["recordType"] == "CUSTOM" and body["version"] == "3"
     assert body["versionArn"] == "arn:aws:bedrock:r:1:prompt/P1:3" and "SECRET BODY" not in json.dumps(body)
 
 
@@ -124,7 +104,7 @@ def test_versioned_arn_is_normalized():
     assert d["arn"] == "arn:aws:bedrock:r:1:prompt/P1"
     import json
     b = json.loads(aws.record_params({"kind": "prompt", "name": "n", "description": "", "data": d})
-                   ["descriptors"]["custom"]["inlineContent"])
+                   ["descriptors"]["custom"]["data"])
     assert b["versionArn"] == "arn:aws:bedrock:r:1:prompt/P1:2"
 
 
@@ -346,7 +326,8 @@ def test_gateways_from_multiple_regions_and_partial_failure(env, monkeypatch):
 def test_skill_md_frontmatter_is_valid_yaml_for_any_description(desc):
     import yaml
     md = aws.record_params({"kind": "skill", "name": "My Skill", "description": desc,
-                           "data": {"source_type": "git", "git_url": "https://github.com/o/r"}})["descriptors"]["agentSkills"]["skillMd"]["inlineContent"]
+                           "data": {"source_type": "git", "git_url": "https://github.com/o/r"}}
+                           )["descriptors"]["agentSkillsDefinition"]["additionalData"]["skillMd"]["data"]
     assert md.startswith("---\n")
     fm = yaml.safe_load(md[4:md.index("\n---\n", 4)])      # 첫 번째 닫는 --- 까지가 frontmatter
     assert fm == {"name": "my-skill", "description": desc}                # 값이 그대로 보존된다

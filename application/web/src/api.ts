@@ -86,7 +86,7 @@ export const cancelApproval = (kind: Kind, id: number) => callErr<Item>(`/api/ca
 // ── 승인 큐 (관리자) ──
 export type RecStatus = "PENDING_APPROVAL" | "APPROVED" | "REJECTED" | "DEPRECATED" | "DRAFT";
 export interface RegRecord {
-  recordId: string; name: string; description: string; descriptorType: string; status: string;
+  recordId: string; name: string; description: string; recordType: string; status: string;
   recordVersion: string; createdAt: string | null; updatedAt: string | null;
   portal: { id: number; kind: Kind; name: string; owner: string } | null;
   reviewers?: string[]; can_decide?: boolean;

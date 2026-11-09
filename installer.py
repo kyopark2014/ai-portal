@@ -2,7 +2,7 @@
 """AI Portal installer (boto3). agentic-work/installer.py 의 구조를 따르되 이 프로젝트에 필요한 것만 만든다.
 
 단계 (모두 idempotent — 다시 실행해도 된다):
-  1. AgentCore Registry  `ai-portal` (+ 승인 요청 메일 알림: EventBridge → SNS 이메일)
+  1. Agent Registry  `ai-portal` (agent-registry 네임스페이스; + 승인 요청 메일 알림: EventBridge → SNS 이메일)
   2. Secrets Manager     세션 서명 키
   3. IAM                 ECS execution / task role
   4. 네트워크            VPC, public subnet x2, ALB SG, ECS SG
@@ -64,7 +64,8 @@ logs = session.client("logs")
 secretsmanager = session.client("secretsmanager")
 cloudfront = session.client("cloudfront")
 events = session.client("events")
-agentcore = session.client("bedrock-agentcore-control")
+agentcore = session.client("bedrock-agentcore-control")   # harness / gateway / runtime
+agent_registry = session.client("agent-registry-control")  # Registry (구 bedrock-agentcore Registry 네임스페이스는 2026-10-30 종료)
 
 TAGS = [{"Key": "Project", "Value": project_name}]
 
@@ -101,11 +102,11 @@ def run(cmd: List[str], **kw: Any) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=True, **kw)
 
 
-# ── 1. Registry ─────────────────────────────────────────────────────
+# ── 1. Registry (agent-registry 네임스페이스) ────────────────────────
 def find_registry(name: str = project_name) -> Optional[Dict[str, Any]]:
     token = None
     while True:
-        r = agentcore.list_registries(**({"nextToken": token} if token else {}))
+        r = agent_registry.list_registries(**({"nextToken": token} if token else {}))
         for reg in r.get("registries", []):
             if reg["name"] == name:
                 return reg
@@ -115,17 +116,21 @@ def find_registry(name: str = project_name) -> Optional[Dict[str, Any]]:
 
 
 def create_registry(auto_approval: bool = False) -> Dict[str, str]:
-    """AgentCore Registry `ai-portal` 을 만든다(이미 있으면 재사용). 인증은 IAM, 승인은 수동."""
-    logger.info("[1/8] AgentCore Registry '%s'", project_name)
+    """Agent Registry `ai-portal` 을 만든다(이미 있으면 재사용). 인증은 IAM, 승인은 수동.
+
+    agent-registry 네임스페이스 API: discoveryConfiguration.authorizerType,
+    approvalConfiguration.autoApprovalRules (["APPROVE_ALL"] 또는 []).
+    """
+    logger.info("[1/8] Agent Registry '%s'", project_name)
     reg = find_registry()
     if reg:
         logger.warning("Registry already exists: %s (%s)", reg["registryId"], reg["status"])
     else:
-        r = agentcore.create_registry(
+        r = agent_registry.create_registry(
             name=project_name,
             description="AI Portal — MCP servers, agents, skills and prompts catalog",
-            authorizerType="AWS_IAM",
-            approvalConfiguration={"autoApproval": auto_approval},
+            discoveryConfiguration={"authorizerType": "AWS_IAM"},
+            approvalConfiguration={"autoApprovalRules": ["APPROVE_ALL"] if auto_approval else []},
         )
         logger.info("Created: %s", r["registryArn"])
         reg = None
@@ -146,9 +151,8 @@ def create_registry(auto_approval: bool = False) -> Dict[str, str]:
 
 # ── 1b. 승인 요청 알림 (Basic: EventBridge → SNS 이메일) ─────────────
 APPROVAL_DETAIL_TYPE = "Registry Record State changed to Pending Approval"
-# 신규 네임스페이스(aws.agent-registry)와 구 네임스페이스(aws.bedrock-agentcore) 둘 다 받는다.
-APPROVAL_PATTERN = {"source": ["aws.agent-registry", "aws.bedrock-agentcore"],
-                    "detail-type": [APPROVAL_DETAIL_TYPE]}
+# agent-registry 네임스페이스 EventBridge source (구 aws.bedrock-agentcore Registry 는 종료됨)
+APPROVAL_PATTERN = {"source": ["aws.agent-registry"], "detail-type": [APPROVAL_DETAIL_TYPE]}
 
 
 def portal_origin() -> str:
@@ -796,7 +800,6 @@ def create_ecs_roles(secret_arns: List[str]) -> Dict[str, str]:
             {"Sid": "AgentCoreRead", "Effect": "Allow", "Resource": "*", "Action": [
                 "bedrock-agentcore:ListHarnesses", "bedrock-agentcore:GetHarness",
                 "bedrock-agentcore:ListAgentRuntimes", "bedrock-agentcore:GetAgentRuntime",
-                "bedrock-agentcore:ListRegistries", "bedrock-agentcore:GetRegistry",
                 # MCP 탭: AgentCore Gateway 동기화
                 "bedrock-agentcore:ListGateways", "bedrock-agentcore:GetGateway"]},
             # 에이전트 생성: harness 를 만들고, Gateway 키를 AgentCore Identity 에 저장하며, harness 실행 역할을 넘긴다
@@ -838,12 +841,14 @@ def create_ecs_roles(secret_arns: List[str]) -> Dict[str, str]:
              "Action": ["cognito-idp:AdminCreateUser", "cognito-idp:AdminGetUser", "cognito-idp:AdminSetUserPassword",
                         "cognito-idp:AdminInitiateAuth", "cognito-idp:AdminAddUserToGroup", "cognito-idp:AdminRemoveUserFromGroup",
                         "cognito-idp:AdminUserGlobalSignOut", "cognito-idp:CreateGroup", "cognito-idp:GetGroup"]},
+            # AWS Agent Registry (agent-registry 네임스페이스). BedrockAgentCoreFullAccess 는 포함하지 않는다.
             {"Sid": "RegistryRecords", "Effect": "Allow", "Resource": "*", "Action": [
-                "bedrock-agentcore:CreateRegistry", "bedrock-agentcore:CreateRegistryRecord",
-                "bedrock-agentcore:GetRegistryRecord", "bedrock-agentcore:ListRegistryRecords",
-                "bedrock-agentcore:UpdateRegistryRecord", "bedrock-agentcore:SubmitRegistryRecordForApproval",
+                "agent-registry:CreateRegistry", "agent-registry:GetRegistry", "agent-registry:ListRegistries",
+                "agent-registry:CreateRegistryRecord", "agent-registry:GetRegistryRecord",
+                "agent-registry:ListRegistryRecords", "agent-registry:UpdateRegistryRecord",
+                "agent-registry:SubmitRegistryRecordForApproval",
                 # 관리자 승인/거절/deprecate, 삭제·승인 요청 취소
-                "bedrock-agentcore:UpdateRegistryRecordStatus", "bedrock-agentcore:DeleteRegistryRecord"]},
+                "agent-registry:UpdateRegistryRecordStatus", "agent-registry:DeleteRegistryRecord"]},
         ]}))
     return {"execution_role_arn": exe, "task_role_arn": task}
 

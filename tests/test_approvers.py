@@ -22,10 +22,12 @@ class FakeSSM:
 class Reg:
     def __init__(self, status="PENDING_APPROVAL"): self.status, self.updates = status, []
     def get_registry_record(self, registryId, recordId):
-        return {"recordId": recordId, "name": "n", "description": "", "descriptorType": "CUSTOM", "status": self.status,
-                "recordVersion": "1", "statusReason": "", "descriptors": {}}
-    def list_registry_records(self, registryId, status, **k):
-        return {"registryRecords": [{"recordId": "rec123456", "name": "n", "descriptorType": "CUSTOM", "status": status}]}
+        return {"recordId": recordId, "name": "n", "displayName": "n", "description": "", "recordType": "CUSTOM",
+                "status": self.status, "recordVersion": "1", "statusReason": "", "descriptors": {}}
+    def list_registry_records(self, registryId, **k):
+        status = next((v for f in k.get("filters") or [] if f.get("name") == "status" for v in f.get("values") or []), self.status)
+        return {"registryRecords": [{"recordId": "rec123456", "name": "n", "displayName": "n",
+                                     "recordType": "CUSTOM", "status": status}]}
     def update_registry_record_status(self, registryId, recordId, status, statusReason):
         self.updates.append((recordId, status)); self.status = status
     def delete_registry_record(self, registryId, recordId): self.deleted = recordId

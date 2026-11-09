@@ -12,7 +12,7 @@ const TABS: { s: RecStatus; label: string }[] = [
   { s: "PENDING_APPROVAL", label: "대기" }, { s: "APPROVED", label: "승인됨" },
   { s: "REJECTED", label: "거절됨" }, { s: "DEPRECATED", label: "Deprecated" },
 ];
-const TYPE: Record<string, string> = { MCP: "MCP", A2A: "Agent", AGENT_SKILLS: "Skill", CUSTOM: "Prompt/Custom" };
+const TYPE: Record<string, string> = { MCP: "MCP", AGENT: "Agent", SKILL: "Skill", CUSTOM: "Prompt/Custom", GATEWAY: "Gateway" };
 
 /** 목록용: 날짜와 시간(분까지)만. 예) 2026. 11. 4. 22:15 */
 function short(iso: string | null) {   // eslint-disable-line
@@ -63,7 +63,7 @@ export default function Approvals({ openId, onOpened, isAdmin = false }: { openI
               <tbody>{rows.map((r) => (
                 <tr key={r.recordId}>
                   <td><strong>{r.name}</strong>{r.description && <div className="hint clip" title={r.description}>{r.description}</div>}</td>
-                  <td>{TYPE[r.descriptorType] ?? r.descriptorType}</td>
+                  <td>{TYPE[r.recordType] ?? r.recordType}</td>
                   <td className="mono sm nw">{r.portal ? r.portal.owner : "포털 외 등록"}
                     {(r.reviewers?.length ?? 0) > 0 && <span className="badge" title={r.reviewers!.join(", ")}>reviewer {r.reviewers!.length}명</span>}</td>
                   <td>{short(r.updatedAt)}</td>
@@ -112,7 +112,7 @@ function ReviewModal({ id, onClose, onDone }: { id: string; onClose: () => void;
         <div className="modal-head"><h2>{d?.name ?? "승인 검토"}</h2><button className="x" aria-label="닫기" onClick={onClose}>×</button></div>
         {!d && !err && <p className="sub">불러오는 중…</p>}
         {d && (<div className="detail">
-          <p className="by">{TYPE[d.descriptorType] ?? d.descriptorType} · v{d.recordVersion} · <span className={`badge st-${d.status}`}>{d.status}</span></p>
+          <p className="by">{TYPE[d.recordType] ?? d.recordType} · v{d.recordVersion} · <span className={`badge st-${d.status}`}>{d.status}</span></p>
           <dl className="kv"><div><dt>Record ID</dt><dd className="mono sm">{d.recordId}</dd></div>
             <div><dt>요청자</dt><dd>{d.portal?.owner ?? "포털 외 등록"}</dd></div>
             <div><dt>갱신</dt><dd>{when(d.updatedAt)}</dd></div></dl>
