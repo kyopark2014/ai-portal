@@ -92,3 +92,24 @@ def test_registry_prompt_used(env, monkeypatch):
     pid = db.insert_item("prompt", "pp", "", "a@x.com", {"prompt_id": "P1"})
     monkeypatch.setattr(catalog, "harness_system_prompt", lambda u, i: [{"text": "from registry"}])
     assert post(client(), prompt_id=pid).status_code == 200 and env[0]["systemPrompt"] == [{"text": "from registry"}]
+
+
+def test_delete_removes_harness_only_for_creator_or_admin(env, monkeypatch):
+    deleted = []
+    monkeypatch.setattr(aws, "delete_harness", lambda hid: deleted.append(hid))
+    iid = post(client("a@x.com")).json()["id"]
+    db.update_item(iid, registry_status="APPROVED")                                  # 남에게도 보이는 상태
+    assert client("b@x.com").delete(f"/api/catalog/agent/{iid}").status_code == 403    # 생성자·관리자만 삭제 가능
+    assert deleted == []
+    r = client("a@x.com").delete(f"/api/catalog/agent/{iid}")
+    assert r.status_code == 200 and "harness" in r.json()["deleted"] and deleted == ["h-1"]
+    assert db.get_item(iid) is None
+
+
+def test_admin_can_delete_and_synced_harness_is_left_alone(env, monkeypatch):
+    deleted = []
+    monkeypatch.setattr(aws, "delete_harness", lambda hid: deleted.append(hid))
+    iid = post(client("a@x.com")).json()["id"]
+    assert client("e2npark@gmail.com").delete(f"/api/catalog/agent/{iid}").status_code == 200 and deleted == ["h-1"]
+    sid = db.insert_item("agent", "synced", "", "a@x.com", {"agent_type": "harness"}, source="aws", ext_id="harness:zzz")
+    assert client("a@x.com").delete(f"/api/catalog/agent/{sid}").status_code == 200 and deleted == ["h-1"]

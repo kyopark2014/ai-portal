@@ -142,6 +142,10 @@ def get_harness(harness_id: str) -> dict:
     return client("bedrock-agentcore-control").get_harness(harnessId=harness_id)["harness"]
 
 
+def delete_harness(harness_id: str) -> None:
+    client("bedrock-agentcore-control").delete_harness(harnessId=harness_id)
+
+
 def runtime_info(runtime_id: str) -> dict:
     """runtime 의 serverProtocol(HTTP/MCP/A2A) 과 인증 방식(JWT/IAM). 조회 실패 시 빈 값."""
     try:

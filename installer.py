@@ -805,6 +805,11 @@ def create_ecs_roles(secret_arns: List[str]) -> Dict[str, str]:
                 "bedrock-agentcore:CreateHarness", "bedrock-agentcore:TagResource",
                 # harness 는 내부적으로 AgentCore Runtime(+endpoint)을 만들며, 이 호출도 호출자 권한으로 검사된다
                 "bedrock-agentcore:CreateAgentRuntime", "bedrock-agentcore:CreateAgentRuntimeEndpoint",
+                # harness 는 기본 관리형 메모리도 만든다(CreateMemory 가 호출자 권한으로 검사됨)
+                "bedrock-agentcore:CreateMemory", "bedrock-agentcore:GetMemory",
+                # 생성자·관리자가 포털에서 에이전트를 지우면 harness 도 함께 지운다(harness 가 만든 runtime·메모리 정리 포함)
+                "bedrock-agentcore:DeleteHarness", "bedrock-agentcore:DeleteAgentRuntime",
+                "bedrock-agentcore:DeleteAgentRuntimeEndpoint", "bedrock-agentcore:DeleteMemory",
                 "bedrock-agentcore:GetApiKeyCredentialProvider",
                 "bedrock-agentcore:CreateApiKeyCredentialProvider", "bedrock-agentcore:GetResourceApiKey",
                 "bedrock-agentcore:GetWorkloadAccessToken", "bedrock-agentcore:CreateWorkloadIdentity",

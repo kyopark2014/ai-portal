@@ -210,6 +210,20 @@ def delete_item(kind: Kind, item_id: int, user: auth.User = Depends(auth.current
                     raise HTTPException(409, "Registry record 가 처리 중(CREATING 등)이라 아직 삭제할 수 없습니다. "
                                              "잠시 후 다시 시도하세요. 아무것도 삭제되지 않았습니다.")
                 raise aws_err(e)
+    # 포털에서 만든 harness 는 AWS 에서도 지운다. 남겨 두면 다음 동기화가 소유자 'aws' 항목으로 되살려 생성자가 지울 수 없게 된다.
+    # 동기화로 가져온 harness(source != portal)는 포털 소유가 아니므로 AWS 리소스는 건드리지 않는다.
+    ext = it.get("ext_id") or ""
+    if kind == "agent" and it["source"] == "portal" and ext.startswith("harness:"):
+        try:
+            aws.delete_harness(ext.split(":", 1)[1])
+            done.append("harness")
+        except (ClientError, BotoCoreError) as e:
+            if not _missing(e):
+                if "registry_record" in done:
+                    db.update_item(item_id, registry_record_id=None, registry_status=None)
+                if isinstance(e, ClientError) and e.response["Error"]["Code"] == "ConflictException":
+                    raise HTTPException(409, "에이전트가 생성 중이라 아직 삭제할 수 없습니다. 잠시 후 다시 시도하세요.")
+                raise aws_err(e)
     if kind == "prompt" and it["data"].get("prompt_id") and it["source"] == "portal":
         try:
             aws.delete_prompt(it["data"]["prompt_id"])
