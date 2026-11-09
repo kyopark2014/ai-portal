@@ -124,6 +124,11 @@ sequenceDiagram
   end
 ```
 
+상세한 동작은 아래를 참조합니다.
+
+<img width="886" height="618" alt="image" src="https://github.com/user-attachments/assets/d4960e04-997d-4e98-a428-6aa8a37df8fd" />
+
+
 ### 구성 요소
 
 | 구성 | 역할 | 코드 |
