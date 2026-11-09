@@ -15,6 +15,15 @@ def env(monkeypatch, tmp_path):
     def _no_aws(*a, **k):
         raise AssertionError("테스트가 실제 AWS 를 호출했습니다")
     monkeypatch.setattr(aws, "client", _no_aws)
+    monkeypatch.setattr(aws, "registry_client", lambda: FakeRegistry())   # 이름 중복 검사용 (기본: 비어 있음)
+    FakeRegistry.records = []
+
+
+class FakeRegistry:
+    records: list[dict] = []
+
+    def list_registry_records(self, registryId, **kw):
+        return {"registryRecords": list(FakeRegistry.records)}
 
 
 def client(email):
@@ -337,3 +346,26 @@ def test_skill_description_over_registry_limit_is_rejected_early(env):
     c = client("a@x.com")
     r = c.post("/api/skills", json={"name": "s", "source_type": "git", "git_url": "https://github.com/o/r", "description": "가" * 1025})
     assert r.status_code == 422
+
+
+@pytest.mark.parametrize("path,body", [
+    ("/api/skills", {"name": "last30days", "source_type": "git", "git_url": "https://github.com/o/r"}),
+    ("/api/mcp", {"name": "last30days", "endpoint": "https://e.example/mcp"}),
+    ("/api/agents", {"name": "last30days"}),
+    ("/api/prompts", {"name": "last30days", "text": "hi"}),
+])
+def test_create_rejects_name_already_in_registry(env, monkeypatch, path, body):
+    monkeypatch.setenv("REGISTRY_ID", "REG")
+    FakeRegistry.records = [{"recordId": "r1", "name": "last30days", "status": "APPROVED"}]
+    monkeypatch.setattr(aws, "create_prompt", lambda *a: pytest.fail("중복이면 prompt 도 만들지 않는다"))
+    r = client("kyopark2014@gmail.com").post(path, json=body)
+    assert r.status_code == 409 and "last30days" in r.json()["detail"]
+    assert db.list_items("skill") == [] and db.list_items("mcp") == []
+
+
+def test_create_allows_name_when_registry_has_no_match(env, monkeypatch):
+    monkeypatch.setenv("REGISTRY_ID", "REG")
+    monkeypatch.setattr(aws, "create_record", lambda rid, it: {"recordArn": "arn:x/rec9", "status": "CREATING"})
+    FakeRegistry.records = [{"recordId": "r1", "name": "other", "status": "APPROVED"}]
+    r = client("a@x.com").post("/api/mcp", json={"name": "last30days", "endpoint": "https://e.example/mcp"})
+    assert r.status_code == 200

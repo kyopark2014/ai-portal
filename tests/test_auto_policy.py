@@ -22,6 +22,7 @@ class SSM:
 
 class Reg:
     def __init__(self): self.status, self.updates, self.submits, self.fail_update = "DRAFT", [], 0, False
+    def list_registry_records(self, registryId, **kw): return {"registryRecords": []}
     def get_registry_record(self, registryId, recordId):
         return {"recordId": recordId, "name": "n", "displayName": "n", "description": "", "recordType": "CUSTOM",
                 "status": self.status, "recordVersion": "1", "statusReason": "", "descriptors": {}}

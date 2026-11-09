@@ -244,8 +244,33 @@ def _prompt_data(p: dict) -> dict:
     return aws.prompt_from_get(p)
 
 
+def _ensure_name_free(name: str, exclude_record_id: str | None = None) -> None:
+    """선택된 Registry 에 같은 이름의 record 가 있으면 409. record name 은 Registry 안에서 유일해야 한다(종류 무관).
+
+    포털 DB 가 아니라 Registry 를 직접 본다 — 다른 사용자·콘솔·다른 종류가 만든 record 도 충돌하기 때문이다.
+    조회 자체가 실패하면 막지 않는다(등록 단계의 ConflictException 이 최종 방어선이다).
+    """
+    rid = selected_registry()
+    if not rid:
+        return
+    want, token = aws.slug(name), None
+    try:
+        client = aws.registry_client()
+        while True:
+            r = client.list_registry_records(registryId=rid, **({"nextToken": token} if token else {}))
+            for rec in r.get("registryRecords", []):
+                if rec.get("name") == want and rec.get("recordId") != exclude_record_id:
+                    raise HTTPException(409, f"같은 이름('{want}')의 record 가 Registry 에 이미 있습니다. 다른 이름을 사용하세요.")
+            token = r.get("nextToken")
+            if not token:
+                return
+    except (ClientError, BotoCoreError) as e:
+        log.warning("registry name check failed: %s", type(e).__name__)
+
+
 @router.post("/prompts")
 def create_prompt(body: PromptIn, user: auth.User = Depends(auth.current_user)):
+    _ensure_name_free(body.name)
     try:
         p = aws.create_prompt(body.name, body.description, body.text, body.model_id)
     except (ClientError, BotoCoreError) as e:
@@ -258,6 +283,8 @@ def create_prompt(body: PromptIn, user: auth.User = Depends(auth.current_user)):
 @router.put("/prompts/{item_id}")
 def update_prompt(item_id: int, body: PromptIn, user: auth.User = Depends(auth.current_user)):
     it = _own(item_id, "prompt", user)
+    if it["registry_record_id"] and aws.slug(body.name) != aws.slug(it["name"]):
+        _ensure_name_free(body.name, it["registry_record_id"])      # 이름을 바꾸면 record name 도 바뀐다
     try:
         p = aws.update_prompt(it["data"]["prompt_id"], body.name, body.description, body.text, body.model_id)
     except (ClientError, BotoCoreError) as e:
@@ -292,6 +319,7 @@ def refresh_prompt(item_id: int, user: auth.User = Depends(auth.current_user)):
 @router.post("/mcp")
 def create_mcp(body: McpIn, user: auth.User = Depends(auth.current_user)):
     _check_url(body.endpoint, "endpoint")
+    _ensure_name_free(body.name)
     data = {"endpoint": body.endpoint, "headers": [h.model_dump() for h in body.headers],
             "approval": "not_required_yet"}  # 승인 흐름은 추후 구현
     iid = db.insert_item("mcp", body.name, body.description, user.email, data)
@@ -332,6 +360,7 @@ def test_mcp(item_id: int, user: auth.User = Depends(auth.current_user)):
 # ── Skill ──
 @router.post("/skills")
 def create_skill(body: SkillIn, user: auth.User = Depends(auth.current_user)):
+    _ensure_name_free(body.name)
     if body.source_type == "git":
         _check_url(body.git_url, "git_url")
         label = body.git_url + (f" ({body.subdirectory})" if body.subdirectory else "")
@@ -352,6 +381,7 @@ def create_skill(body: SkillIn, user: auth.User = Depends(auth.current_user)):
 def create_agent(body: AgentIn, user: auth.User = Depends(auth.current_user)):
     if body.invoke_url:
         _check_url(body.invoke_url, "invoke_url")
+    _ensure_name_free(body.name)
     iid = db.insert_item("agent", body.name, body.description, user.email, body.model_dump(exclude={"name", "description"}))
     if body.description.strip():
         db.update_item(iid, desc_edited=1)
