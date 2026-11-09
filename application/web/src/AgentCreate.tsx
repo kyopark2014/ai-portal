@@ -28,7 +28,7 @@ export default function AgentCreate({ user }: { user: api.User }) {
   const [name, setName] = useState("");
   const [models, setModels] = useState<api.GwModel[]>([]);
   const [model, setModel] = useState("");
-  const [mode, setMode] = useState<"text" | "registry">("text");
+  const [mode, setMode] = useState<"text" | "registry">("registry");
   const [text, setText] = useState("");
   const [promptId, setPromptId] = useState<number | null>(null);
   const [prompts, setPrompts] = useState<api.Item[]>([]);
@@ -47,7 +47,9 @@ export default function AgentCreate({ user }: { user: api.User }) {
       const ok = r.models.filter((m) => m.usable);
       setModels(ok); setModel((cur) => cur || (ok.find((m) => m.id.endsWith("claude-sonnet-5-5")) ?? ok[0])?.id || "");
     }).catch((e) => setLoadErr(`모델 목록: ${e.message}`));
-    api.listItems("prompt").then(setPrompts).catch(() => {});
+    // 기본은 레지스트리 프롬프트. 선택할 프롬프트가 없으면 직접 입력으로 돌려 "다음"이 막히지 않게 한다
+    api.listItems("prompt").then((l) => { setPrompts(l); if (l.length === 0) setMode("text"); })
+      .catch(() => setMode("text"));
     api.listItems("mcp").then((l) => setMcps(l.filter((i) =>
       i.usable && !(i.data.kind === "gateway" && i.data.authorizer === "CUSTOM_JWT")))).catch(() => {});
     api.listItems("skill").then(setSkills).catch(() => {});
@@ -70,7 +72,7 @@ export default function AgentCreate({ user }: { user: api.User }) {
     setBusy(false);
   }
   function reset() {
-    setStep(0); setName(""); setText(""); setPromptId(null); setMode("text"); setMcpSel([]); setSkillSel([]);
+    setStep(0); setName(""); setText(""); setPromptId(null); setMode("registry"); setMcpSel([]); setSkillSel([]);
     setAuthKind("IAM"); setErr(""); setCreated(null);
   }
 
