@@ -801,7 +801,9 @@ def create_ecs_roles(secret_arns: List[str]) -> Dict[str, str]:
                 "bedrock-agentcore:ListGateways", "bedrock-agentcore:GetGateway"]},
             # 에이전트 생성: harness 를 만들고, Gateway 키를 AgentCore Identity 에 저장하며, harness 실행 역할을 넘긴다
             {"Sid": "CreateAgents", "Effect": "Allow", "Resource": "*", "Action": [
-                "bedrock-agentcore:CreateHarness", "bedrock-agentcore:GetApiKeyCredentialProvider",
+                # CreateHarness 에 tags 를 넘기므로 TagResource 도 필요하다(없으면 AccessDenied)
+                "bedrock-agentcore:CreateHarness", "bedrock-agentcore:TagResource",
+                "bedrock-agentcore:GetApiKeyCredentialProvider",
                 "bedrock-agentcore:CreateApiKeyCredentialProvider", "bedrock-agentcore:GetResourceApiKey",
                 "bedrock-agentcore:GetWorkloadAccessToken", "bedrock-agentcore:CreateWorkloadIdentity",
                 "bedrock-agentcore:GetWorkloadIdentity", "secretsmanager:CreateSecret", "secretsmanager:TagResource"]},
