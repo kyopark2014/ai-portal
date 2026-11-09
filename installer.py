@@ -803,6 +803,8 @@ def create_ecs_roles(secret_arns: List[str]) -> Dict[str, str]:
             {"Sid": "CreateAgents", "Effect": "Allow", "Resource": "*", "Action": [
                 # CreateHarness 에 tags 를 넘기므로 TagResource 도 필요하다(없으면 AccessDenied)
                 "bedrock-agentcore:CreateHarness", "bedrock-agentcore:TagResource",
+                # harness 는 내부적으로 AgentCore Runtime(+endpoint)을 만들며, 이 호출도 호출자 권한으로 검사된다
+                "bedrock-agentcore:CreateAgentRuntime", "bedrock-agentcore:CreateAgentRuntimeEndpoint",
                 "bedrock-agentcore:GetApiKeyCredentialProvider",
                 "bedrock-agentcore:CreateApiKeyCredentialProvider", "bedrock-agentcore:GetResourceApiKey",
                 "bedrock-agentcore:GetWorkloadAccessToken", "bedrock-agentcore:CreateWorkloadIdentity",
