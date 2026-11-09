@@ -196,3 +196,21 @@ def test_me_still_works_when_the_reviewer_store_is_down(env):
     env[0].fail = "AccessDeniedException"; admins.reset_cache()
     r = client(USER).get("/api/me")
     assert r.status_code == 200 and r.json()["can_review"] is False                                   # 로그인은 막지 않고 권한도 넓히지 않는다
+
+
+def test_approval_makes_the_owner_a_reviewer_of_that_record(env):
+    _pending_item(owner=USER, rec="rec123456")
+    assert client(USER).get("/api/me").json()["can_review"] is False
+    assert client(ADMIN).post("/api/approvals/rec123456/decision", json={"decision": "APPROVED"}).status_code == 200
+    assert admins.reviewers_of("rec123456") == [USER]
+    assert client(USER).get("/api/me").json()["can_review"] is True
+
+
+def test_rejection_does_not_make_the_owner_a_reviewer_and_admin_owner_is_skipped(env):
+    _pending_item(owner=USER, rec="rec123456")
+    client(ADMIN).post("/api/reviewers", json={"record_id": "rec123456", "email": REV})
+    client(ADMIN).post("/api/approvals/rec123456/decision", json={"decision": "REJECTED", "reason": "no"})
+    assert admins.reviewers_of("rec123456") == []                                    # 거절: 지정 정리, 소유자도 추가하지 않는다
+    env[1].status = "PENDING_APPROVAL"; _pending_item(owner=ADMIN, rec="rec999999")
+    client(ADMIN).post("/api/approvals/rec999999/decision", json={"decision": "APPROVED"})
+    assert admins.reviewers_of("rec999999") == []                                    # 관리자는 이미 전체 권한

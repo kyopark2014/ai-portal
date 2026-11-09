@@ -156,6 +156,19 @@ def add_reviewer(record_id: str, email: str) -> list[str]:
     return m[record_id]
 
 
+def set_owner_as_reviewer(record_id: str, owner: str | None) -> None:
+    """등록 승인(APPROVED)된 record 의 소유자를 reviewer 로 둔다(그 record 의 사용 신청을 처리할 수 있다).
+    관리자이거나 이미 reviewer 이면 할 일이 없다. best effort — 실패해도 승인 자체에는 영향이 없다."""
+    if not owner or not valid_email(owner.strip().lower()):
+        return
+    try:
+        add_reviewer(record_id, owner)
+    except ValueError:
+        pass                                                      # 관리자 / 이미 reviewer / 상한
+    except Exception:  # noqa: BLE001
+        log.warning("could not add owner as reviewer for %s", record_id)
+
+
 def remove_reviewer(record_id: str, email: str) -> list[str]:
     email = email.strip().lower()
     m = reviewers_map(); cur = set(m.get(record_id, []))

@@ -253,9 +253,8 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
           {usage && !usage.can_use && <p className="hint">사용 신청이 승인되면 이 Agent 를 테스트할 수 있습니다.</p>}
           {d.arn && !(d.agent_type === "runtime" && d.protocol === "MCP") && (usage?.can_use ?? true) && (<>
             <AgentHowTo item={item} />
-            {d.auth === "JWT" ? <p className="hint">JWT 인증 harness 는 포털에서 직접 테스트할 수 없습니다. 위 사용 방법의 예제로 호출하세요.</p> : (<>
-              <h3>테스트 <span className="hint">{d.agent_type === "harness" ? "harness" : "AgentCore runtime"}</span></h3>
-              <McpTest key={item.id} item={item} /></>)}</>)}
+            <h3>테스트 <span className="hint">{d.agent_type === "harness" ? "harness" : "AgentCore runtime"}{d.auth === "JWT" && " · JWT: 포털이 내 Cognito 토큰으로 호출"}</span></h3>
+            <McpTest key={item.id} item={item} /></>)}
           {d.agent_type === "runtime" && d.protocol === "MCP" && <p className="hint">MCP 프로토콜 runtime은 대화형 agent가 아니라 MCP 서버입니다. MCP 탭에서 테스트하세요.</p>}
           </>)}
 

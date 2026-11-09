@@ -150,11 +150,14 @@ def decide(record_id: str, body: DecisionIn, user: auth.User = Depends(require_a
         client.update_registry_record_status(registryId=rid, recordId=rec, status=body.decision, statusReason=reason)
     except (ClientError, BotoCoreError) as e:
         raise catalog.aws_err(e)
-    try:
-        admins.clear_reviewers(rec)
-    except Exception:  # noqa: BLE001 — 정리는 best effort
-        pass
     item = _portal_item(rec)
+    if body.decision == "APPROVED":     # 승인되면 소유자가 이 record 의 reviewer(사용 신청 처리자)가 된다
+        admins.set_owner_as_reviewer(rec, item["owner"] if item else None)
+    else:
+        try:
+            admins.clear_reviewers(rec)
+        except Exception:  # noqa: BLE001 — 정리는 best effort
+            pass
     if item:    # 포털 항목의 표시 상태를 맞춘다
         db.update_item(item["id"], registry_status=body.decision)
     return {"recordId": rec, "status": body.decision, "statusReason": reason}

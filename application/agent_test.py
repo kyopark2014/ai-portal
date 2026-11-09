@@ -15,12 +15,13 @@ import re
 import uuid
 from typing import Any, Iterator
 
+from botocore import UNSIGNED
 from botocore.config import Config
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import auth, aws, catalog, mcp_test, usage
+from . import auth, aws, catalog, mcp_test, mcp_token, usage
 
 router = APIRouter(prefix="/api")
 MAX_TURNS = 20
@@ -120,12 +121,22 @@ def _runtime_events(arn: str, payload: bytes, session: str, user: auth.User) -> 
 
 
 def _harness_events(arn: str, history: list[dict], user: auth.User, session: str,
-                    system: list[dict] | None = None) -> Iterator[dict]:
-    rt = aws.boto3.client("bedrock-agentcore", region_name=_region_of(arn), config=_cfg)
+                    system: list[dict] | None = None, bearer: str | None = None) -> Iterator[dict]:
+    """bearer 가 있으면 JWT 인증 harness: SigV4 서명을 끄고 Authorization: Bearer 헤더로 호출한다."""
+    region = _region_of(arn)
+    if bearer:
+        rt = aws.boto3.client("bedrock-agentcore", region_name=region, config=Config(
+            signature_version=UNSIGNED, read_timeout=300, connect_timeout=10, retries={"max_attempts": 0}))
+        rt.meta.events.register("before-call.bedrock-agentcore.InvokeHarness",
+                                lambda params, **kw: params["headers"].__setitem__("Authorization", f"Bearer {bearer}"))
+    else:
+        rt = aws.boto3.client("bedrock-agentcore", region_name=region, config=_cfg)
     msgs = [{"role": m["role"], "content": [{"text": m["content"]}]} for m in history]
-    r = rt.invoke_harness(harnessArn=arn, runtimeSessionId=session, runtimeUserId=mcp_test.actor_id(user.email),
-                          actorId=mcp_test.actor_id(user.email), messages=msgs,
-                          **({"systemPrompt": system} if system else {}))
+    extra: dict[str, Any] = {"systemPrompt": system} if system else {}
+    if not bearer:                                  # JWT 호출의 사용자는 토큰이 정한다 (IAM 호출에서만 runtimeUserId 를 지정)
+        extra["runtimeUserId"] = mcp_test.actor_id(user.email)
+    r = rt.invoke_harness(harnessArn=arn, runtimeSessionId=session, actorId=mcp_test.actor_id(user.email),
+                          messages=msgs, **extra)
     yield from mcp_test.relay_harness_stream(r["stream"])
 
 
@@ -139,8 +150,8 @@ def chat(item_id: int, body: AgentChatIn, user: auth.User = Depends(auth.current
     it = catalog.visible_item(item_id, user, "agent")
     usage.require_use(it, user)                                   # 사용 신청이 승인된 사람(소유자 포함)만 대화할 수 있다
     kind, arn = target_of(it)
-    if kind == "harness" and (it["data"] or {}).get("auth") == "JWT":
-        raise HTTPException(422, "JWT 인증 harness 는 포털에서 직접 호출할 수 없습니다. 사용 방법의 예제로 Cognito 토큰을 받아 호출하세요")
+    jwt = kind == "harness" and (it["data"] or {}).get("auth") == "JWT"
+    bearer = mcp_token.issue(user.email)["access_token"] if jwt else None   # 이 요청에만 쓸 토큰 (저장·로그하지 않는다)
     if kind == "harness":
         try:
             st = aws.get_harness(arn.split("/")[-1])["status"]
@@ -157,7 +168,7 @@ def chat(item_id: int, body: AgentChatIn, user: auth.User = Depends(auth.current
         def enc(e: dict) -> bytes:
             return f"data: {json.dumps(e, ensure_ascii=False)}\n\n".encode()
         try:
-            src = (_harness_events(arn, history, user, session, system) if kind == "harness"
+            src = (_harness_events(arn, history, user, session, system, bearer) if kind == "harness"
                    else _runtime_events(arn, _runtime_payload(history[-1]["content"], history, user, session), session, user))
             for ev in src:
                 yield enc(ev)

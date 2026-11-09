@@ -141,9 +141,33 @@ def test_internal_harness_runtimes_are_not_synced(env, monkeypatch):
     assert names == ["agentic_work"] and db.list_items("agent")[0]["data"]["protocol"] == "HTTP"
 
 
-def test_jwt_harness_is_not_callable_from_portal(env):
+def test_jwt_harness_is_called_with_users_bearer_token(env, monkeypatch):
+    from application import mcp_token
+    seen = {}
+    monkeypatch.setattr(mcp_token, "issue", lambda email: {"access_token": "TOK-" + email})
+    monkeypatch.setattr(aws, "get_harness", lambda hid: {"status": "READY"})
+    monkeypatch.setattr(agent_test, "_harness_events", lambda arn, history, user, session, system=None, bearer=None: (seen.update(b=bearer), iter([{"t": "ok"}]))[1])
     iid = agent({"arn": HN, "agent_type": "harness", "auth": "JWT"})
-    assert client().post(f"/api/agents/{iid}/chat", json=BODY).status_code == 422
+    r = client().post(f"/api/agents/{iid}/chat", json=BODY)
+    assert r.status_code == 200 and seen["b"] == "TOK-a@x.com" and "TOK-" not in r.text
+
+
+def test_jwt_harness_unsigned_request_carries_authorization_header(env, monkeypatch):
+    sent = {}
+
+    class FakeClient:
+        class meta:
+            class events:
+                @staticmethod
+                def register(name, fn):
+                    p = {"headers": {}}; fn(p); sent["headers"] = p["headers"]; sent["event"] = name
+        def invoke_harness(self, **kw):
+            sent["kw"] = kw
+            return {"stream": iter([])}
+    monkeypatch.setattr(aws.boto3, "client", lambda *a, **k: (sent.update(cfg=k["config"]), FakeClient())[1])
+    list(agent_test._harness_events(HN, [{"role": "user", "content": "hi"}], auth.User("a@x.com", "N", "", "user"), "s" * 40, None, "TOK"))
+    assert sent["headers"] == {"Authorization": "Bearer TOK"} and sent["event"].endswith("InvokeHarness")
+    assert sent["cfg"].signature_version is not None and "runtimeUserId" not in sent["kw"]
 
 
 def test_empty_assistant_turns_are_dropped_and_empty_user_turns_refused(env, monkeypatch):

@@ -127,12 +127,12 @@ def test_auto_review_failure_leaves_the_request_pending_for_a_human(env):
     assert r.status_code == 200 and r.json()["registry_status"] == "PENDING_APPROVAL" and r.json()["auto_reviewed"] is False
 
 
-def test_auto_review_clears_reviewers_and_never_overrides_a_decided_record(env):
+def test_auto_review_replaces_reviewers_with_the_owner_and_never_overrides_a_decided_record(env):
     ssm, reg = env
     client(ADMIN).put("/api/policy", json={"auto_review": True})
     i = draft_item(); admins.add_reviewer("rec1", "rev@x.com")
     client(USER).post(f"/api/catalog/mcp/{i}/registry/submit")
-    assert admins.reviewers_of("rec1") == []                                                        # 처리 끝났으니 reviewer 정보 정리
+    assert admins.reviewers_of("rec1") == ["user@x.com"]                                            # 이전 지정은 정리되고 소유자만 reviewer
     reg.updates.clear(); reg.status = "REJECTED"                                                    # 이미 거절된 record 는 건드리지 않는다
     assert catalog._auto_review(i) is False and reg.updates == []
 

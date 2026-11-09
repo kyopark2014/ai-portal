@@ -1,0 +1,45 @@
+{
+  "dialect": "postgresql",
+  "database": "hrdb",
+  "tables": [
+    {
+      "name": "employees",
+      "description": "임직원 HR 마스터 정보",
+      "columns": [
+        {"name": "emp_id", "type": "VARCHAR(32)", "description": "사번 (PK), 예: EMP20100001"},
+        {"name": "name", "type": "VARCHAR(100)", "description": "이름"},
+        {"name": "gender", "type": "VARCHAR(10)", "description": "성별 (남/여)"},
+        {"name": "birth_date", "type": "DATE", "description": "생년월일"},
+        {"name": "address", "type": "VARCHAR(255)", "description": "주소"},
+        {"name": "department", "type": "VARCHAR(100)", "description": "부서 (인사팀, 마케팅팀, 영업팀, 개발팀, 재무팀, 기획팀, 운영팀 등)"},
+        {"name": "job_title", "type": "VARCHAR(100)", "description": "직무 (인사담당, 마케터, 백엔드 개발자, 재무분석가 등)"},
+        {"name": "job_grade", "type": "VARCHAR(50)", "description": "직급 (사원, 대리, 과장, 차장, 부장 등)"},
+        {"name": "hire_date", "type": "DATE", "description": "입사일"},
+        {"name": "email", "type": "VARCHAR(255)", "description": "회사 이메일"},
+        {"name": "phone", "type": "VARCHAR(50)", "description": "휴대폰 번호"}
+      ]
+    }
+  ],
+  "sample_queries": [
+    {
+      "input": "개발팀 인원 수는?",
+      "query": "SELECT COUNT(*) AS cnt FROM employees WHERE department = '개발팀'"
+    },
+    {
+      "input": "부장 직급 직원 목록",
+      "query": "SELECT emp_id, name, department, job_title, hire_date FROM employees WHERE job_grade = '부장' ORDER BY hire_date"
+    },
+    {
+      "input": "부서별 인원 수",
+      "query": "SELECT department, COUNT(*) AS cnt FROM employees GROUP BY department ORDER BY cnt DESC"
+    },
+    {
+      "input": "2020년 이후 입사한 직원",
+      "query": "SELECT emp_id, name, department, hire_date FROM employees WHERE hire_date >= DATE '2020-01-01' ORDER BY hire_date"
+    },
+    {
+      "input": "이름이 이동현인 직원 정보",
+      "query": "SELECT * FROM employees WHERE name = '이동현'"
+    }
+  ]
+}

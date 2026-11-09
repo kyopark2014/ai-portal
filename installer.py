@@ -11,12 +11,14 @@
   7. ECS Fargate         cluster / task / service (desired=1)
   8. CloudFront          https 진입점 (*.cloudfront.net)
   +  Harness agent       `ai_portal` (MCP 테스트용. AgentCore Harness + 전용 실행 역할)
+  +  HR Advisor          Aurora DB + MCP Runtime → `gw-ai-portal` target (`runtime/installer_hr.py`)
 
 사용:
   python installer.py --registry-only       # Registry 만 생성
   python installer.py --notifications-only  # 승인 요청 메일 알림(SNS + EventBridge)만 구성
   python installer.py --harness-only        # MCP 테스트용 harness agent `ai_portal` 만 생성
   python installer.py --gateway-only        # AgentCore Gateway `gw-ai-portal`·`gw-ai-portal-websearch-jwt`·`gw-ai-portal-websearch-iam` (+ target, interceptor Lambda) 만 생성
+  python installer.py --hr-only             # Aurora + HR Advisor MCP Runtime(+ gw-ai-portal target)만 구성
   python installer.py                       # 전체 설치
   python installer.py --skip-docker-build   # 인프라만 갱신(ECR 최신 이미지 재사용)
   python installer.py --image-only          # 이미지 빌드/푸시 후 서비스 재배포
@@ -527,12 +529,12 @@ def _wait(get, ok="READY", what="") -> Dict[str, Any]:
 
 
 def ensure_gateway(rgn: str = region, websearch: bool = False, cognito_jwt: bool = False,
-                   name: Optional[str] = None, config_prefix: Optional[str] = None) -> Dict[str, str]:
+                   name: Optional[str] = None) -> Dict[str, str]:
     """gateway + target + interceptor Lambda 를 rgn 에 만든다. 이미 있으면 재사용한다.
 
     name: gateway 이름(기본 `gw-<project>-<region>`). target: websearch=False → MCP server(`TARGET_MCP_ENDPOINT`),
-    True → AWS web-search connector. config.json 에는 기본적으로 포털 리전은 `gateway_*`, 그 밖의 리전은 `gateway_<region>_*` 로
-    기록하며, 같은 리전에 gateway 가 둘 이상이면 config_prefix(예: `gateway_websearch_jwt`)로 구분한다."""
+    True → AWS web-search connector. 포털 리전 gateway 만 `config.json` 의 `gateway_*` 에 기록한다(websearch gateway 는
+    이름으로 AWS 에서 찾아 재사용하므로 config 에 두지 않는다)."""
     gw_name = name or gateway_name(rgn)
     jwt: Optional[Dict[str, Any]] = None
     if cognito_jwt:                                  # Cognito 앱 클라이언트가 발급한 토큰만 허용
@@ -580,14 +582,14 @@ def ensure_gateway(rgn: str = region, websearch: bool = False, cognito_jwt: bool
         logger.info("Created target: %s → %s", tid, endpoint)
     _wait(lambda: ac.get_gateway_target(gatewayIdentifier=gid, targetId=tid), what="Gateway target")
 
-    p = config_prefix or ("gateway" if rgn == region else f"gateway_{rgn.replace('-', '_')}")
-    info = {f"{p}_id": gid, f"{p}_arn": cur["gatewayArn"], f"{p}_url": cur.get("gatewayUrl", ""), f"{p}_region": rgn,
-            f"{p}_name": gw_name, f"{p}_target_id": tid, f"{p}_interceptor_lambda_arn": interceptor_arn}
-    if p == "gateway":                                 # 기존 키 유지
-        info["interceptor_lambda"] = INTERCEPTOR_FUNCTION
-        info["interceptor_lambda_arn"] = interceptor_arn
-    save_config(**info)
-    logger.info("✓ Gateway READY: %s", info[f"{p}_url"])
+    info = {"id": gid, "arn": cur["gatewayArn"], "url": cur.get("gatewayUrl", ""), "region": rgn,
+            "name": gw_name, "target_id": tid, "interceptor_lambda_arn": interceptor_arn}
+    if not websearch and rgn == region:                # 포털 리전 gateway 만 config 에 남김
+        save_config(gateway_id=gid, gateway_arn=cur["gatewayArn"], gateway_url=cur.get("gatewayUrl", ""),
+                    gateway_region=rgn, gateway_name=gw_name, gateway_target_id=tid,
+                    gateway_interceptor_lambda_arn=interceptor_arn,
+                    interceptor_lambda=INTERCEPTOR_FUNCTION, interceptor_lambda_arn=interceptor_arn)
+    logger.info("✓ Gateway READY: %s", info["url"])
     return info
 
 
@@ -595,10 +597,30 @@ def ensure_gateways() -> None:
     """gw-ai-portal (IAM, MCP server target), gw-ai-portal-websearch-jwt (Cognito JWT, web-search target),
     gw-ai-portal-websearch-iam (IAM, web-search target)."""
     ensure_gateway(region)
-    ensure_gateway(WEBSEARCH_REGION, websearch=True, cognito_jwt=True,
-                   name=WEBSEARCH_JWT_GATEWAY_NAME, config_prefix="gateway_websearch_jwt")
-    ensure_gateway(WEBSEARCH_REGION, websearch=True, cognito_jwt=False,
-                   name=WEBSEARCH_IAM_GATEWAY_NAME, config_prefix="gateway_websearch_iam")
+    ensure_gateway(WEBSEARCH_REGION, websearch=True, cognito_jwt=True, name=WEBSEARCH_JWT_GATEWAY_NAME)
+    ensure_gateway(WEBSEARCH_REGION, websearch=True, cognito_jwt=False, name=WEBSEARCH_IAM_GATEWAY_NAME)
+
+
+def ensure_hr_advisor(*, skip_docker: bool = False) -> Dict[str, str]:
+    """Aurora HR DB + HR Advisor MCP Runtime 을 만들고 `gw-ai-portal` target 으로 붙인다.
+
+    실제 로직은 `runtime/installer_hr.py` 에 있다. VPC(`vpc_id`)와 gateway(`gateway_id`)가
+    config.json 에 있어야 한다.
+    """
+    runtime_dir = str(ROOT / "runtime")
+    if runtime_dir not in sys.path:
+        sys.path.insert(0, runtime_dir)
+    import installer_hr  # runtime/ 아래 독립 스크립트
+
+    cfg = load_config()
+    if not cfg.get("vpc_id"):
+        raise RuntimeError("vpc_id 가 없습니다. VPC 를 먼저 구성하세요 (전체 설치 또는 create_vpc).")
+    if not cfg.get("gateway_id"):
+        raise RuntimeError(
+            "gateway_id 가 없습니다. `python installer.py --gateway-only` 를 먼저 실행하세요."
+        )
+    logger.info("HR Advisor: Aurora + MCP Runtime → gw-ai-portal target")
+    return installer_hr.ensure_all(skip_docker=skip_docker)
 
 
 # ── 1d-2. Cognito (Gateway JWT 인증의 IdP) ──────────────────────────────────
@@ -663,8 +685,53 @@ def ensure_google_idp(cg: Any, pool_id: str) -> None:
         logger.info("Google identity provider exists (설정 갱신)")
 
 
+def cognito_domain_prefix() -> str:
+    """Hosted UI 도메인 prefix. 계정별로 유일해야 해서 account_id 를 붙인다."""
+    return f"{project_name}-{account_id}"
+
+
+def ensure_cognito_domain(cg: Any, pool_id: str) -> str:
+    """Claude Code OAuth 에 필요한 Cognito Hosted UI 도메인을 만든다.
+
+    도메인이 없으면 OIDC discovery 가 cognito-idp…/authorize 를 가리키고, 그 URL 은
+    BadRequest("The server did not understand the operation…") 를 반환한다.
+    정상 authorize 는 https://<prefix>.auth.<region>.amazoncognito.com/oauth2/authorize.
+    """
+    prefix = cognito_domain_prefix()
+    desc = cg.describe_user_pool(UserPoolId=pool_id)["UserPool"]
+    existing = desc.get("Domain") or ""
+    if existing:
+        if existing != prefix:
+            logger.warning("Cognito domain already set: %s (기대 prefix %s). 기존 도메인을 씁니다", existing, prefix)
+        else:
+            logger.warning("Cognito domain exists: %s", existing)
+        return existing
+    try:
+        cg.create_user_pool_domain(Domain=prefix, UserPoolId=pool_id)
+        logger.info("Created Cognito domain: %s", prefix)
+    except ClientError as e:
+        code = e.response["Error"]["Code"]
+        # 다른 풀/계정이 같은 prefix 를 쓰면 InvalidParameterException. 이미 이 풀에 붙어 있으면 무시.
+        if code not in ("InvalidParameterException", "ResourceConflictException"):
+            raise
+        again = cg.describe_user_pool(UserPoolId=pool_id)["UserPool"].get("Domain") or ""
+        if again:
+            logger.warning("Cognito domain race/exists: %s", again)
+            return again
+        raise RuntimeError(f"Cognito domain '{prefix}' 를 만들 수 없습니다: {e.response['Error'].get('Message', e)}") from e
+    # ACTIVE 될 때까지 잠깐 기다린다(없으면 authorize 가 잠시 404/BadRequest 일 수 있다)
+    for _ in range(30):
+        st = cg.describe_user_pool_domain(Domain=prefix).get("DomainDescription", {}).get("Status")
+        if st == "ACTIVE":
+            break
+        time.sleep(2)
+    else:
+        logger.warning("Cognito domain %s 가 아직 ACTIVE 가 아닙니다(Status=%s). 잠시 후 다시 시도하세요", prefix, st)
+    return prefix
+
+
 def ensure_cognito() -> Dict[str, str]:
-    """사용자 풀 + 도메인 + Google IdP + 앱 클라이언트. 이미 있으면 재사용한다(앱 클라이언트 설정은 코드와 맞춘다).
+    """사용자 풀 + Hosted UI 도메인 + Google IdP + 앱 클라이언트. 이미 있으면 재사용한다(앱 클라이언트 설정은 코드와 맞춘다).
     로그인은 Google federation 이다. 사용 승인은 Cognito 그룹이 아니라 포털이 MCP 항목에 기록한 승인자 목록(이메일)으로 판단한다."""
     cg = session.client("cognito-idp", region_name=COGNITO_REGION)
     logger.info("[1d-2] Cognito user pool '%s' in %s", COGNITO_POOL_NAME, COGNITO_REGION)
@@ -675,6 +742,9 @@ def ensure_cognito() -> Dict[str, str]:
     else:
         pool_id = cg.create_user_pool(**cognito_pool_params())["UserPool"]["Id"]
         logger.info("Created user pool: %s", pool_id)
+    domain_prefix = ensure_cognito_domain(cg, pool_id)
+    hosted = f"{domain_prefix}.auth.{COGNITO_REGION}.amazoncognito.com"
+    google_redirect = f"https://{hosted}/oauth2/idpresponse"
     ensure_google_idp(cg, pool_id)
     cl = next((c for c in cg.list_user_pool_clients(UserPoolId=pool_id, MaxResults=60)["UserPoolClients"]
                if c["ClientName"] == COGNITO_CLIENT_NAME), None)
@@ -688,9 +758,12 @@ def ensure_cognito() -> Dict[str, str]:
         client_id = cg.create_user_pool_client(**cognito_client_params(pool_id), **cognito_oauth_params())["UserPoolClient"]["ClientId"]
         logger.info("Created app client: %s", client_id)
     info = {"cognito_user_pool_id": pool_id, "cognito_client_id": client_id, "cognito_region": COGNITO_REGION,
-            "cognito_discovery_url": f"https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{pool_id}/.well-known/openid-configuration"}
+            "cognito_discovery_url": f"https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{pool_id}/.well-known/openid-configuration",
+            "cognito_domain": hosted, "cognito_domain_prefix": domain_prefix,
+            "cognito_google_redirect_uri": google_redirect}
     save_config(**info)
-    logger.info("✓ Cognito ready: %s", info["cognito_discovery_url"])
+    logger.info("✓ Cognito ready: %s (Hosted UI %s)", info["cognito_discovery_url"], hosted)
+    logger.info("  Google OAuth 승인된 리디렉션 URI 에 추가: %s", google_redirect)
     return info
 
 
@@ -816,7 +889,10 @@ def create_ecs_roles(secret_arns: List[str]) -> Dict[str, str]:
                 "bedrock-agentcore:GetApiKeyCredentialProvider",
                 "bedrock-agentcore:CreateApiKeyCredentialProvider", "bedrock-agentcore:GetResourceApiKey",
                 "bedrock-agentcore:GetWorkloadAccessToken", "bedrock-agentcore:CreateWorkloadIdentity",
-                "bedrock-agentcore:GetWorkloadIdentity", "secretsmanager:CreateSecret", "secretsmanager:TagResource"]},
+                "bedrock-agentcore:GetWorkloadIdentity",
+                # harness 삭제 시 내부 runtime 의 workload identity 도 호출자 권한으로 지운다(없으면 DELETE_FAILED)
+                "bedrock-agentcore:DeleteWorkloadIdentity",
+                "secretsmanager:CreateSecret", "secretsmanager:TagResource"]},
             {"Sid": "PassHarnessRole", "Effect": "Allow", "Action": "iam:PassRole",
              "Resource": [f"arn:aws:iam::{account_id}:role/role-harness-for-{project_name}-{region}"],
              "Condition": {"StringEquals": {"iam:PassedToService": "bedrock-agentcore.amazonaws.com"}}},
@@ -1065,6 +1141,8 @@ def deploy_ecs(net: Dict[str, Any], alb: Dict[str, str], roles: Dict[str, str], 
         "COGNITO_USER_POOL_ID": load_config().get("cognito_user_pool_id", ""),
         "COGNITO_CLIENT_ID": load_config().get("cognito_client_id", ""),
         "COGNITO_REGION": load_config().get("cognito_region", ""),
+        # Hosted UI 도메인(Claude Code OAuth·사용 방법 예제). prefix 가 아니라 전체 호스트명.
+        "COGNITO_DOMAIN": load_config().get("cognito_domain", ""),
     }
     if not env["GOOGLE_CLIENT_ID"]:
         raise RuntimeError("GOOGLE_CLIENT_ID 가 .env 에 없습니다")
@@ -1248,6 +1326,8 @@ def main() -> None:
     ap.add_argument("--table-only", action="store_true", help="DynamoDB 저장소 테이블만 만들고 종료")
     ap.add_argument("--harness-only", action="store_true", help="MCP 테스트용 harness agent 만 생성하고 종료")
     ap.add_argument("--gateway-only", action="store_true", help="AgentCore Gateway(+target, interceptor Lambda)만 생성하고 종료")
+    ap.add_argument("--hr-only", action="store_true",
+                    help="Aurora + HR Advisor MCP Runtime을 만들고 gw-ai-portal target으로 등록")
     ap.add_argument("--domain-only", action="store_true", help="커스텀 도메인(인증서·CloudFront 별칭·DNS)만 설정하고 종료")
     ap.add_argument("--auto-approval", action="store_true", help="Registry auto-approval 켜기(기본: 꺼짐)")
     ap.add_argument("--skip-docker-build", action="store_true", help="ECR 의 최신 이미지를 재사용")
@@ -1264,6 +1344,15 @@ def main() -> None:
         return
     if args.gateway_only:
         ensure_gateways()
+        return
+    if args.hr_only:
+        ensure_gateways()
+        net = create_vpc()
+        save_config(vpc_id=net["vpc_id"])
+        info = ensure_hr_advisor(skip_docker=args.skip_docker_build)
+        logger.info("✓ HR Advisor runtime=%s target=%s",
+                    info.get("hr_advisor_mcp_runtime_arn"),
+                    info.get("hr_advisor_mcp_gateway_target_id"))
         return
     if args.domain_only:
         cfg = load_config()
@@ -1286,6 +1375,8 @@ def main() -> None:
     gateway_secret_arn = ensure_gateway_secret()
     roles = create_ecs_roles([secret_arn] + ([gateway_secret_arn] if gateway_secret_arn else []))
     net = create_vpc()
+    save_config(vpc_id=net["vpc_id"])  # HR Advisor Aurora 가 VPC 를 재사용
+    hr_info = ensure_hr_advisor(skip_docker=args.skip_docker_build)
     alb = create_alb(net)
     repo_uri = ensure_ecr()
     image = latest_image(repo_uri) if args.skip_docker_build else build_and_push(repo_uri)
@@ -1298,6 +1389,9 @@ def main() -> None:
     logger.info("=" * 60)
     logger.info("✓ Done in %.0fs", time.time() - t0)
     logger.info("URL: %s", origin)
+    logger.info("HR Advisor MCP: %s (gateway target %s)",
+                hr_info.get("hr_advisor_mcp_runtime_arn"),
+                hr_info.get("hr_advisor_mcp_gateway_target_id"))
     logger.info("할 일: Google Cloud Console → OAuth client → Authorized JavaScript origins 에 %s 추가", origin)
     logger.info("(CloudFront 배포 전파에 몇 분 걸릴 수 있습니다)")
 

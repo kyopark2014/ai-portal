@@ -3,6 +3,92 @@ import * as api from "./api";
 import type { Item } from "./api";
 
 /** Agent 사용 방법: AgentCore harness / runtime 을 Python(boto3)으로 호출하는 예제. (Claude Code·Codex 는 제공하지 않는다) */
+/** harness 스트림 출력: 텍스트 + tool 요청/입력/결과 + 종료 사유 + 토큰 사용량. (test_hr_agent.py 와 같은 처리) */
+const STREAM_LOOP = String.raw`# 텍스트 + tool 요청/응답 출력
+# harness 는 메시지마다 contentBlockIndex 를 다시 쓰므로 toolUseId 로 추적한다.
+block_tool_use, block_tool_result = {}, {}          # contentBlockIndex → toolUseId
+tool_names, tool_inputs, tool_results = {}, {}, {}   # toolUseId → 이름 / 입력 JSON 조각 / 결과 텍스트
+in_text = False
+
+
+def end_text():
+    global in_text
+    if in_text:
+        print()
+        in_text = False
+
+
+def fmt_json(s: str) -> str:
+    try:
+        return json.dumps(json.loads(s), ensure_ascii=False, indent=2) if s.strip() else "{}"
+    except json.JSONDecodeError:
+        return s
+
+
+def result_text(part) -> str:
+    items = part if isinstance(part, list) else [part]
+    out = ""
+    for it in items:
+        if isinstance(it, dict):
+            out += it["text"] if "text" in it else json.dumps(it.get("json", it), ensure_ascii=False)
+        elif it is not None:
+            out += str(it)
+    return out
+
+
+for ev in r["stream"]:
+    if "messageStart" in ev:
+        block_tool_use.clear()
+        block_tool_result.clear()
+    elif "contentBlockStart" in ev:
+        cbs = ev["contentBlockStart"]
+        idx, st = cbs.get("contentBlockIndex", 0), cbs.get("start") or {}
+        if "toolUse" in st:                              # tool 호출 시작
+            end_text()
+            tid, name = (st["toolUse"].get("toolUseId") or f"idx-{idx}").strip(), st["toolUse"].get("name") or ""
+            block_tool_use[idx], tool_names[tid], tool_inputs[tid] = tid, name, ""
+            print(f"\n[tool_start] {name}  (id={tid})", flush=True)
+        elif "toolResult" in st:                         # tool 결과 시작
+            end_text()
+            tid = (st["toolResult"].get("toolUseId") or "").strip()
+            if tid:
+                block_tool_result[idx] = tid
+                tool_results.setdefault(tid, "")
+                print(f"\n[tool_result_start] {tool_names.get(tid, tid)}", flush=True)
+    elif "contentBlockDelta" in ev:
+        cbd = ev["contentBlockDelta"]
+        idx, dl = cbd.get("contentBlockIndex", 0), cbd.get("delta") or {}
+        if dl.get("text"):
+            in_text = True
+            print(dl["text"], end="", flush=True)
+        if "toolUse" in dl and block_tool_use.get(idx):  # tool 입력은 JSON 조각으로 나뉘어 온다
+            tool_inputs[block_tool_use[idx]] += (dl["toolUse"] or {}).get("input") or ""
+        if "toolResult" in dl and block_tool_result.get(idx):
+            tool_results[block_tool_result[idx]] += result_text(dl["toolResult"])
+    elif "contentBlockStop" in ev:
+        idx = ev["contentBlockStop"].get("contentBlockIndex", 0)
+        if idx in block_tool_use:                        # tool 입력 완성
+            end_text()
+            tid = block_tool_use[idx]
+            print(f"\n[tool_call] {tool_names.get(tid, '')}\n{fmt_json(tool_inputs.get(tid, ''))}", flush=True)
+        if idx in block_tool_result:                     # tool 결과 완성
+            end_text()
+            tid = block_tool_result[idx]
+            print(f"\n[tool_result] {tool_names.get(tid, tid)}\n{tool_results.get(tid, '')[:4000]}", flush=True)
+    elif "messageStop" in ev:
+        end_text()
+        print(f"\n[stop] {ev['messageStop'].get('stopReason')}", flush=True)
+    elif "metadata" in ev:
+        u = (ev["metadata"] or {}).get("usage") or {}
+        print(f"\n[usage] input={u.get('inputTokens')} output={u.get('outputTokens')}", flush=True)
+    else:
+        for k in ("internalServerException", "validationException", "runtimeClientError"):
+            if k in ev:
+                end_text()
+                print(f"\n[error] {ev[k].get('message', k)}", flush=True)
+                break
+end_text()`;
+
 const JWT_HARNESS = String.raw`"""JWT 인증 harness 를 Cognito OAuth(브라우저 로그인, Authorization Code + PKCE)로 받은 토큰으로 호출한다."""
 import base64
 import hashlib
@@ -40,7 +126,7 @@ def browser_login() -> str:
                 self.send_response(404); self.end_headers(); return
             got.update({k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()})
             self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.end_headers()
-            self.wfile.write("<h3>Authentication successful. 이 창을 닫아도 됩니다.</h3>".encode())
+            self.wfile.write("<h3>Authentication successful.<br>이 창을 닫아도 됩니다.</h3>".encode())
 
         def log_message(self, *a):
             pass
@@ -79,11 +165,7 @@ r = client.invoke_harness(
     runtimeSessionId=f"{uuid.uuid4()}-{uuid.uuid4()}",   # 33자 이상, 같은 값을 쓰면 대화가 이어집니다
     messages=[{"role": "user", "content": [{"text": "안녕하세요, 무엇을 할 수 있나요?"}]}],
 )
-for ev in r["stream"]:
-    delta = ev.get("contentBlockDelta", {}).get("delta", {})
-    if delta.get("text"):
-        print(delta["text"], end="", flush=True)
-print()
+${STREAM_LOOP}
 `;
 
 function build(item: Item, clientId: string, domain: string): { code: string; notes: string[] } | null {
@@ -111,11 +193,7 @@ r = client.invoke_harness(
     messages=[{"role": "user", "content": [{"text": "안녕하세요, 무엇을 할 수 있나요?"}]}],
 )
 
-for ev in r["stream"]:
-    delta = ev.get("contentBlockDelta", {}).get("delta", {})
-    if delta.get("text"):
-        print(delta["text"], end="", flush=True)
-print()`,
+${STREAM_LOOP}`,
     notes: ["pip install boto3  (최신 버전이 필요합니다: pip install -U boto3)",
             "호출하는 AWS 계정/역할에 bedrock-agentcore:InvokeHarness 권한이 필요합니다.",
             "이 Agent 의 사용 신청이 승인되어 있어야 포털에서 테스트할 수 있습니다."] };

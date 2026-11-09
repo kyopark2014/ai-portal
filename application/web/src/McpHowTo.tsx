@@ -50,7 +50,7 @@ def _browser_login() -> dict:
                 self.send_response(404); self.end_headers(); return
             got.update({k: v[0] for k, v in q.items()})
             self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.end_headers()
-            self.wfile.write("<h3>Authentication successful. 이 창을 닫아도 됩니다.</h3>".encode())
+            self.wfile.write("<h3>Authentication successful.<br>이 창을 닫아도 됩니다.</h3>".encode())
 
         def log_message(self, *a):
             pass

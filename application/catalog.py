@@ -725,7 +725,8 @@ def _auto_review(item_id: int) -> bool:
     except (ClientError, BotoCoreError) as e:
         log.warning("auto-review failed for item %s (left pending): %s", item_id, type(e).__name__)
         return False
-    _forget_assignment(it["registry_record_id"])
+    _forget_assignment(it["registry_record_id"])               # 이전 지정은 정리하고
+    admins.set_owner_as_reviewer(it["registry_record_id"], it["owner"])   # 승인된 record 의 소유자를 reviewer 로 둔다
     _sync_status(item_id)
     return True
 
