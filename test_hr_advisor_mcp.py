@@ -2,7 +2,7 @@
 """gw-ai-portal(IAM) 을 통해 HR Advisor MCP 도구를 호출하는 스모크 테스트.
 
 흐름:
-  1. application/config.json 에서 gateway_url 읽기
+  1. application/config.json 에서 gateway_iam_url(gw-ai-portal-iam, SigV4) 읽기
   2. SigV4 서명으로 MCP initialize → tools/list
   3. HR Advisor 도구(query_hr / generate_query / execute_query) 찾기
   4. query_hr 로 샘플 HR 질문 실행
@@ -32,8 +32,8 @@ PROTOCOL_VERSION = "2025-03-26"
 
 def load_config() -> dict[str, Any]:
     cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    if not cfg.get("gateway_url"):
-        raise SystemExit("config.json 에 gateway_url 이 없습니다. installer.py --gateway-only 를 먼저 실행하세요.")
+    if not cfg.get("gateway_iam_url"):
+        raise SystemExit("config.json 에 gateway_iam_url 이 없습니다. installer.py --gateway-only 를 먼저 실행하세요.")
     return cfg
 
 
@@ -188,8 +188,8 @@ def _pick_hr_tools(tools: list[dict[str, Any]]) -> dict[str, str]:
 def main(argv: list[str]) -> int:
     question = " ".join(argv[1:]).strip() or DEFAULT_QUESTION
     cfg = load_config()
-    gateway_url = cfg["gateway_url"]
-    region = cfg.get("gateway_region") or cfg.get("region") or "us-west-2"
+    gateway_url = cfg["gateway_iam_url"]
+    region = cfg.get("gateway_iam_region") or cfg.get("gateway_region") or cfg.get("region") or "us-west-2"
 
     print(f"Gateway: {gateway_url}")
     print(f"Region:  {region}")

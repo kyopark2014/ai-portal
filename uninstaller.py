@@ -55,8 +55,10 @@ INTERCEPTOR_FUNCTION = f"lambda-{project_name}-intercepter"
 COGNITO_POOL_NAME = f"{project_name}-users"
 SSM_PARAMS = [f"/{project_name}/admins", f"/{project_name}/reviewers", f"/{project_name}/policy"]
 
-# (gateway 이름, 리전). installer.ensure_gateways() 가 만드는 세 개
-GATEWAYS = [(f"gw-{project_name}", region),
+# (gateway 이름, 리전). installer.ensure_gateways() 가 만드는 네 개 + 예전 이름(gw-ai-portal, 이름을 바꿀 수 없어 남아 있을 수 있다)
+GATEWAYS = [(f"gw-{project_name}-jwt", region),
+            (f"gw-{project_name}-iam", region),
+            (f"gw-{project_name}", region),
             (f"gw-{project_name}-websearch-jwt", WEBSEARCH_REGION),
             (f"gw-{project_name}-websearch-iam", WEBSEARCH_REGION)]
 

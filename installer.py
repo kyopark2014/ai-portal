@@ -11,14 +11,14 @@
   7. ECS Fargate         cluster / task / service (desired=1)
   8. CloudFront          https 진입점 (*.cloudfront.net)
   +  Harness agent       `ai_portal` (MCP 테스트용. AgentCore Harness + 전용 실행 역할)
-  +  HR Advisor          Aurora DB + MCP Runtime → `gw-ai-portal` target (`runtime/installer_hr.py`)
+  +  HR Advisor          Aurora DB + MCP Runtime → `gw-ai-portal-jwt`·`gw-ai-portal-iam` target (`runtime/installer_hr.py`)
 
 사용:
   python installer.py --registry-only       # Registry 만 생성
   python installer.py --notifications-only  # 승인 요청 메일 알림(SNS + EventBridge)만 구성
   python installer.py --harness-only        # MCP 테스트용 harness agent `ai_portal` 만 생성
-  python installer.py --gateway-only        # AgentCore Gateway `gw-ai-portal`·`gw-ai-portal-websearch-jwt`·`gw-ai-portal-websearch-iam` (+ target, interceptor Lambda) 만 생성
-  python installer.py --hr-only             # Aurora + HR Advisor MCP Runtime(+ gw-ai-portal target)만 구성
+  python installer.py --gateway-only        # AgentCore Gateway `gw-ai-portal-jwt`·`gw-ai-portal-iam`·`gw-ai-portal-websearch-jwt`·`gw-ai-portal-websearch-iam` (+ target, interceptor Lambda) 만 생성
+  python installer.py --hr-only             # Aurora + HR Advisor MCP Runtime(+ gw-ai-portal-jwt/iam target)만 구성
   python installer.py                       # 전체 설치
   python installer.py --skip-docker-build   # 인프라만 갱신(ECR 최신 이미지 재사용)
   python installer.py --image-only          # 이미지 빌드/푸시 후 서비스 재배포
@@ -349,8 +349,13 @@ def gateway_name(rgn: str) -> str:
     return f"gw-{project_name}" if rgn == region else f"gw-{project_name}-{rgn}"   # 포털 리전의 gateway: gw-ai-portal
 
 
-GATEWAY_NAME = gateway_name(region)                           # gw-ai-portal
-TARGET_NAME = f"target-{project_name}"                    # target-ai-portal
+GATEWAY_NAME = gateway_name(region)                           # gw-ai-portal (예전 이름. 이름은 바꿀 수 없어 옛 gateway 가 남아 있을 수 있다)
+# 포털 리전(us-west-2)의 gateway 두 개. target(knowledge-mcp · hr-advisor)은 같고 인증 방식만 다르다.
+#   gw-ai-portal-jwt : Cognito JWT 인증 (Claude Code 등 사용자 토큰으로 호출)  → config.json 의 gateway_*
+#   gw-ai-portal-iam : IAM(SigV4) 인증                                          → config.json 의 gateway_iam_*
+PORTAL_JWT_GATEWAY_NAME = f"gw-{project_name}-jwt"
+PORTAL_IAM_GATEWAY_NAME = f"gw-{project_name}-iam"
+TARGET_NAME = "knowledge-mcp"                              # gw-ai-portal 의 기본 MCP server target (AWS Knowledge MCP)
 INTERCEPTOR_FUNCTION = f"lambda-{project_name}-intercepter"   # lambda-ai-portal-intercepter (이름 철자는 요청대로)
 # IAM 역할은 전역이라 이름에 리전을 넣는다(리전마다 따로). us-west-2 의 기존 이름은 그대로다.
 def interceptor_role_name(rgn: str) -> str: return f"role-lambda-interceptor-for-{project_name}-{rgn}"
@@ -501,6 +506,30 @@ def gateway_params(role_arn: str, interceptor_arn: str, name: str = GATEWAY_NAME
         tags={"Project": project_name})
 
 
+def delete_gateway(ac: Any, gateway_id: str) -> None:
+    """gateway 를 target 부터 지우고 완전히 사라질 때까지 기다린다(target 이 남아 있으면 gateway 삭제가 거부된다)."""
+    for t in ac.list_gateway_targets(gatewayIdentifier=gateway_id).get("items", []):
+        ac.delete_gateway_target(gatewayIdentifier=gateway_id, targetId=t["targetId"])
+        logger.info("Deleting target %s (%s)", t["name"], t["targetId"])
+    for _ in range(60):                                  # target 삭제는 비동기다
+        if not ac.list_gateway_targets(gatewayIdentifier=gateway_id).get("items"):
+            break
+        time.sleep(5)
+    else:
+        raise TimeoutError("gateway target 삭제가 끝나지 않았습니다")
+    ac.delete_gateway(gatewayIdentifier=gateway_id)
+    logger.info("Deleting gateway %s", gateway_id)
+    for _ in range(60):
+        try:
+            ac.get_gateway(gatewayIdentifier=gateway_id)
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ResourceNotFoundException":
+                return
+            raise
+        time.sleep(5)
+    raise TimeoutError("gateway 삭제가 끝나지 않았습니다")
+
+
 def target_params(gateway_id: str, endpoint: str, name: str = TARGET_NAME) -> Dict[str, Any]:
     """create_gateway_target 인자. MCP server target(인증 없음). 인증이 필요한 서버는 credentialProviderConfigurations 를 추가한다."""
     return dict(
@@ -529,12 +558,12 @@ def _wait(get, ok="READY", what="") -> Dict[str, Any]:
 
 
 def ensure_gateway(rgn: str = region, websearch: bool = False, cognito_jwt: bool = False,
-                   name: Optional[str] = None) -> Dict[str, str]:
+                   name: Optional[str] = None, recreate: bool = False, config_prefix: Optional[str] = None) -> Dict[str, str]:
     """gateway + target + interceptor Lambda 를 rgn 에 만든다. 이미 있으면 재사용한다.
 
     name: gateway 이름(기본 `gw-<project>-<region>`). target: websearch=False → MCP server(`TARGET_MCP_ENDPOINT`),
-    True → AWS web-search connector. 포털 리전 gateway 만 `config.json` 의 `gateway_*` 에 기록한다(websearch gateway 는
-    이름으로 AWS 에서 찾아 재사용하므로 config 에 두지 않는다)."""
+    True → AWS web-search connector. config_prefix 를 주면 `config.json` 에 `<prefix>_id/arn/url/region/name/target_id` 로 기록한다
+    (포털 리전 gateway: jwt → `gateway`, iam → `gateway_iam`. websearch gateway 는 이름으로 AWS 에서 찾아 재사용하므로 두지 않는다)."""
     gw_name = name or gateway_name(rgn)
     jwt: Optional[Dict[str, Any]] = None
     if cognito_jwt:                                  # Cognito 앱 클라이언트가 발급한 토큰만 허용
@@ -546,6 +575,15 @@ def ensure_gateway(rgn: str = region, websearch: bool = False, cognito_jwt: bool
     interceptor_arn = ensure_interceptor_lambda(rgn)
     role = ensure_gateway_role(interceptor_arn, rgn, gw_name, websearch)
     gw = find_gateway(gw_name, ac)
+    want = "CUSTOM_JWT" if cognito_jwt else "AWS_IAM"
+    if gw and gw.get("authorizerType") != want:      # 인증 방식은 UpdateGateway 로 바꿀 수 없다 → 지우고 다시 만들어야 한다
+        if not recreate:
+            raise RuntimeError(f"{gw_name} 의 인증 방식이 {gw.get('authorizerType')} 입니다(기대: {want}). 인증 방식은 만든 뒤 바꿀 수 없어 "
+                               f"gateway·target 을 삭제하고 다시 만들어야 하며 gateway ID·URL 이 바뀝니다. "
+                               f"그래도 진행하려면 `python installer.py --gateway-only --recreate-gateway` 를 실행하세요")
+        logger.warning("%s 인증 방식 변경(%s → %s): gateway %s 를 삭제하고 다시 만듭니다", gw_name, gw.get("authorizerType"), want, gw["gatewayId"])
+        delete_gateway(ac, gw["gatewayId"])
+        gw = None
     if gw:
         logger.warning("Gateway already exists: %s (%s)", gw["gatewayId"], gw["status"])
         gid = gw["gatewayId"]
@@ -562,10 +600,6 @@ def ensure_gateway(rgn: str = region, websearch: bool = False, cognito_jwt: bool
                 raise
         logger.info("Created gateway: %s", gid)
     cur = _wait(lambda: ac.get_gateway(gatewayIdentifier=gid), what="Gateway")
-    want = "CUSTOM_JWT" if cognito_jwt else "AWS_IAM"
-    if cur.get("authorizerType") != want:            # 인증 방식은 만든 뒤 바꾸지 않는다 → 지우고 다시 만들어야 한다
-        raise RuntimeError(f"{gw_name} 의 인증 방식이 {cur.get('authorizerType')} 입니다(기대: {want}). "
-                           f"gateway 와 target 을 삭제한 뒤 다시 실행하세요")
 
     tgt = next((t for t in ac.list_gateway_targets(gatewayIdentifier=gid).get("items", []) if t["name"] == target_name), None)
     if tgt:
@@ -584,25 +618,27 @@ def ensure_gateway(rgn: str = region, websearch: bool = False, cognito_jwt: bool
 
     info = {"id": gid, "arn": cur["gatewayArn"], "url": cur.get("gatewayUrl", ""), "region": rgn,
             "name": gw_name, "target_id": tid, "interceptor_lambda_arn": interceptor_arn}
-    if not websearch and rgn == region:                # 포털 리전 gateway 만 config 에 남김
-        save_config(gateway_id=gid, gateway_arn=cur["gatewayArn"], gateway_url=cur.get("gatewayUrl", ""),
-                    gateway_region=rgn, gateway_name=gw_name, gateway_target_id=tid,
-                    gateway_interceptor_lambda_arn=interceptor_arn,
+    if config_prefix:                                  # 포털 리전 gateway 는 config 에 남긴다
+        pf = config_prefix
+        save_config(**{f"{pf}_id": gid, f"{pf}_arn": cur["gatewayArn"], f"{pf}_url": cur.get("gatewayUrl", ""),
+                       f"{pf}_region": rgn, f"{pf}_name": gw_name, f"{pf}_target_id": tid,
+                       f"{pf}_interceptor_lambda_arn": interceptor_arn},
                     interceptor_lambda=INTERCEPTOR_FUNCTION, interceptor_lambda_arn=interceptor_arn)
     logger.info("✓ Gateway READY: %s", info["url"])
     return info
 
 
-def ensure_gateways() -> None:
-    """gw-ai-portal (IAM, MCP server target), gw-ai-portal-websearch-jwt (Cognito JWT, web-search target),
-    gw-ai-portal-websearch-iam (IAM, web-search target)."""
-    ensure_gateway(region)
-    ensure_gateway(WEBSEARCH_REGION, websearch=True, cognito_jwt=True, name=WEBSEARCH_JWT_GATEWAY_NAME)
-    ensure_gateway(WEBSEARCH_REGION, websearch=True, cognito_jwt=False, name=WEBSEARCH_IAM_GATEWAY_NAME)
+def ensure_gateways(recreate: bool = False) -> None:
+    """gw-ai-portal-jwt (Cognito JWT) · gw-ai-portal-iam (IAM): 둘 다 MCP server target(knowledge-mcp),
+    gw-ai-portal-websearch-jwt (Cognito JWT) · gw-ai-portal-websearch-iam (IAM): 둘 다 web-search target."""
+    ensure_gateway(region, cognito_jwt=True, name=PORTAL_JWT_GATEWAY_NAME, recreate=recreate, config_prefix="gateway")
+    ensure_gateway(region, cognito_jwt=False, name=PORTAL_IAM_GATEWAY_NAME, recreate=recreate, config_prefix="gateway_iam")
+    ensure_gateway(WEBSEARCH_REGION, websearch=True, cognito_jwt=True, name=WEBSEARCH_JWT_GATEWAY_NAME, recreate=recreate)
+    ensure_gateway(WEBSEARCH_REGION, websearch=True, cognito_jwt=False, name=WEBSEARCH_IAM_GATEWAY_NAME, recreate=recreate)
 
 
 def ensure_hr_advisor(*, skip_docker: bool = False) -> Dict[str, str]:
-    """Aurora HR DB + HR Advisor MCP Runtime 을 만들고 `gw-ai-portal` target 으로 붙인다.
+    """Aurora HR DB + HR Advisor MCP Runtime 을 만들고 `gw-ai-portal-jwt`·`gw-ai-portal-iam` target 으로 붙인다.
 
     실제 로직은 `runtime/installer_hr.py` 에 있다. VPC(`vpc_id`)와 gateway(`gateway_id`)가
     config.json 에 있어야 한다.
@@ -619,7 +655,7 @@ def ensure_hr_advisor(*, skip_docker: bool = False) -> Dict[str, str]:
         raise RuntimeError(
             "gateway_id 가 없습니다. `python installer.py --gateway-only` 를 먼저 실행하세요."
         )
-    logger.info("HR Advisor: Aurora + MCP Runtime → gw-ai-portal target")
+    logger.info("HR Advisor: Aurora + MCP Runtime → gw-ai-portal-jwt/iam target")
     return installer_hr.ensure_all(skip_docker=skip_docker)
 
 
@@ -1326,6 +1362,8 @@ def main() -> None:
     ap.add_argument("--table-only", action="store_true", help="DynamoDB 저장소 테이블만 만들고 종료")
     ap.add_argument("--harness-only", action="store_true", help="MCP 테스트용 harness agent 만 생성하고 종료")
     ap.add_argument("--gateway-only", action="store_true", help="AgentCore Gateway(+target, interceptor Lambda)만 생성하고 종료")
+    ap.add_argument("--recreate-gateway", action="store_true",
+                    help="gateway 의 인증 방식이 기대와 다르면 gateway·target 을 삭제하고 다시 만든다(ID·URL 이 바뀐다)")
     ap.add_argument("--hr-only", action="store_true",
                     help="Aurora + HR Advisor MCP Runtime을 만들고 gw-ai-portal target으로 등록")
     ap.add_argument("--domain-only", action="store_true", help="커스텀 도메인(인증서·CloudFront 별칭·DNS)만 설정하고 종료")
@@ -1343,7 +1381,7 @@ def main() -> None:
         ensure_harness()
         return
     if args.gateway_only:
-        ensure_gateways()
+        ensure_gateways(args.recreate_gateway)
         return
     if args.hr_only:
         ensure_gateways()

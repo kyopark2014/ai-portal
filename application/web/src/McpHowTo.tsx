@@ -112,9 +112,9 @@ function build(tool: Tool, item: Item, clientId: string, domain: string): { code
       notes: hdrs.length ? ["헤더 값은 보안상 숨겨져 있습니다. 등록 시 사용한 값을 넣으세요."] : [] };
   }
   if (tool === "codex") {
-    if (jwt) return { lang: "bash", code: `# 포털에서 발급한 접속 토큰을 환경 변수로 전달\nexport MCP_TOKEN="<ACCESS_TOKEN>"\ncodex mcp add ${name} --url ${url} \\\n  --bearer-token-env-var MCP_TOKEN`,
-      notes: ["Codex 의 mcp add 에는 Claude Code 의 --client-id 에 해당하는 옵션이 없어, Cognito 로그인(OAuth) 대신 액세스 토큰을 Bearer 로 보냅니다.",
-              "액세스 토큰은 만료(최대 24시간)되므로 만료되면 새 토큰으로 바꿔야 합니다. 이 MCP 의 사용 신청이 승인되어 있어야 합니다."] };
+    if (jwt) return { lang: "bash", code: `codex mcp add ${name} \\\n  --url ${url} \\\n  --oauth-client-id ${cid}`,
+      notes: [`등록한 뒤 codex mcp login ${name} 을 실행하면 브라우저에서 Google 로그인(OAuth)합니다.`,
+              "이 MCP 의 사용 신청이 승인되어 있어야 도구가 보입니다."] };
     if (iam) return { lang: "bash", code: `codex mcp add ${name} -- uvx mcp-proxy-for-aws@latest \\\n  ${url} \\\n  --region ${d.region || "us-west-2"}`,
       notes: ["AWS_IAM 인증 Gateway 는 SigV4 서명이 필요해 mcp-proxy-for-aws 를 거칩니다 (AWS 자격 증명 필요)."] };
     return { lang: "bash", code: `codex mcp add ${name} --url ${url}`, notes: hdrs.length ? ["이 서버는 헤더(" + hdrs.join(", ") + ")가 필요합니다. ~/.codex/config.toml 의 http_headers 에 추가하세요."] : [] };
