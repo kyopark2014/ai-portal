@@ -84,6 +84,28 @@ def _view(item: dict, user: auth.User) -> dict:
     return out
 
 
+TRANSIENT_STATES = ("CREATING", "UPDATING")
+
+
+def refresh_agent_status(item: dict) -> dict:
+    """저장된 상태가 전이 중(CREATING/UPDATING)이면 AWS 에서 현재 상태를 읽어 DB 에 반영한다. 항목을 돌려준다.
+
+    생성 직후의 CREATING 은 동기화(로그인·새로고침, 최소 5분 간격)가 오기 전까지 갱신되지 않는다. 폴링 대신, 사용자가 항목을
+    열거나 테스트할 때 한 번만 확인한다. READY·FAILED 같은 안정 상태는 조회하지 않는다. 조회에 실패하면 저장값을 그대로 둔다."""
+    d = item.get("data") or {}
+    if item["kind"] != "agent" or d.get("status") not in TRANSIENT_STATES or not d.get("arn"):
+        return item
+    rid = d["arn"].split("/")[-1]
+    try:
+        st = (aws.get_harness(rid)["status"] if d.get("agent_type") == "harness" else aws.get_runtime_status(rid))
+    except (ClientError, BotoCoreError):
+        return item
+    if st and st != d["status"]:
+        db.update_item(item["id"], data={**d, "status": st})
+        return db.get_item(item["id"])
+    return item
+
+
 # ── 요청 모델 ──
 class PromptIn(BaseModel):
     name: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
@@ -164,6 +186,12 @@ def my_records(scope: Literal["mine", "all"] = "mine", user: auth.User = Depends
     for i in items:
         counts[i["registry_status"] or "NOT_REGISTERED"] = counts.get(i["registry_status"] or "NOT_REGISTERED", 0) + 1
     return {"items": [_out(i, user) for i in items], "counts": counts, "total": len(items)}
+
+
+@router.post("/catalog/agent/{item_id}/status")
+def agent_status(item_id: int, user: auth.User = Depends(auth.current_user)):
+    """전이 중(CREATING/UPDATING)인 agent 의 상태를 AWS 에서 다시 읽어 갱신한다. 이미 안정 상태면 AWS 를 부르지 않는다."""
+    return _out(refresh_agent_status(visible_item(item_id, user, "agent")), user)
 
 
 @router.get("/catalog/{kind}")
@@ -334,6 +362,8 @@ def test_mcp(item_id: int, user: auth.User = Depends(auth.current_user)):
     from . import usage
     usage.require_use(it, user)                                        # 사용 신청이 승인된 사람만 실제로 연결해 볼 수 있다
     d = it["data"]
+    if d.get("kind") == "runtime":
+        raise HTTPException(422, "MCP runtime 은 IAM/JWT 인증이 필요해 포털에서 직접 호출할 수 없습니다")
     if d.get("kind") == "gateway" and d.get("authorizer") != "NONE":
         raise HTTPException(422, f"AgentCore Gateway({d.get('authorizer')} 인증)는 포털에서 직접 호출할 수 없습니다. "
                                  "SigV4 서명 또는 토큰이 필요합니다")
@@ -410,6 +440,7 @@ def sync_all() -> dict[str, int]:
     db.prune_synced("prompt", seen_p)
 
     seen_a: set[str] = set()
+    runtime_mcp: set[str] = set()                     # 프로토콜이 MCP 인 runtime 은 Agent 가 아니라 MCP 항목이다
     try:
         for h in aws.list_harnesses():
             hid = f"harness:{h['harnessId']}"
@@ -435,26 +466,36 @@ def sync_all() -> dict[str, int]:
             if r.get("agentRuntimeName", "").startswith("harness_"):
                 continue
             rid = f"runtime:{r['agentRuntimeId']}"
+            info = aws.runtime_info(r["agentRuntimeId"])
+            arn = r.get("agentRuntimeArn", "")
+            if (info.get("protocol") or "").upper() == "MCP":
+                runtime_mcp.add(rid)
+                mdata = {"kind": "runtime", "arn": arn, "endpoint": aws.runtime_mcp_url(arn), "status": r.get("status", ""),
+                         "version": r.get("agentRuntimeVersion", ""), "region": arn.split(":")[3] if arn.count(":") > 3 else "",
+                         "headers": [], **info}
+                if db.upsert_synced("mcp", rid, r.get("agentRuntimeName", r["agentRuntimeId"]), r.get("description", ""), mdata):
+                    added["mcp"] = added.get("mcp", 0) + 1
+                continue
             seen_a.add(rid)
-            data = {"agent_type": "runtime", "arn": r.get("agentRuntimeArn", ""), "status": r.get("status", ""),
-                    "version": r.get("agentRuntimeVersion", ""), **aws.runtime_info(r["agentRuntimeId"])}
+            data = {"agent_type": "runtime", "arn": arn, "status": r.get("status", ""),
+                    "version": r.get("agentRuntimeVersion", ""), **info}
             if db.upsert_synced("agent", rid, r.get("agentRuntimeName", r["agentRuntimeId"]),
                                 r.get("description", ""), data):
                 added["agent"] += 1
         db.prune_synced("agent", seen_a)
     except (ClientError, BotoCoreError) as e:
         log.warning("list_agent_runtimes failed: %s", e)
-    added["mcp"] = _sync_gateways()
+    added["mcp"] = added.get("mcp", 0) + _sync_gateways(runtime_mcp)
     return added
 
 
-def _sync_gateways() -> int:
+def _sync_gateways(extra_keep: set[str] = frozenset()) -> int:
     """AgentCore Gateway(MCP) 를 여러 리전에서 가져와 mcp 항목으로 반영한다.
 
     리전별로 독립 처리한다: 한 리전의 조회가 실패하면 그 리전의 기존 항목은 그대로 두고(지우지 않음),
     다른 리전은 정상 반영한다. 같은 gatewayId 가 리전마다 있을 수 있어 ext_id 에 리전을 넣는다.
     """
-    n, kept, failed = 0, set(), []
+    n, kept, failed = 0, set(extra_keep), []
     for reg in aws.gateway_regions():
         try:
             gws = aws.list_gateways(reg)

@@ -46,6 +46,8 @@ def tool_for(item: dict, bearer: str | None = None) -> dict:
     `Authorization: Bearer` 헤더를 붙인 remote MCP 로 연결한다. 토큰은 호출마다 새로 만들고 저장·로그하지 않는다."""
     d = item["data"]
     name = _TOOLNAME.sub("_", item["name"])[:40] or "mcp"
+    if d.get("kind") == "runtime":
+        raise HTTPException(422, "MCP runtime 은 IAM/JWT 인증이 필요해 포털에서 직접 테스트할 수 없습니다")
     if d.get("kind") == "gateway" and d.get("authorizer") == "CUSTOM_JWT":
         if not bearer:
             raise HTTPException(422, "JWT 인증 Gateway 를 테스트하려면 접속 토큰이 필요합니다")

@@ -163,6 +163,10 @@ def get_harness(harness_id: str) -> dict:
     return client("bedrock-agentcore-control").get_harness(harnessId=harness_id)["harness"]
 
 
+def get_runtime_status(runtime_id: str) -> str:
+    return client("bedrock-agentcore-control").get_agent_runtime(agentRuntimeId=runtime_id).get("status", "")
+
+
 def delete_harness(harness_id: str) -> None:
     client("bedrock-agentcore-control").delete_harness(harnessId=harness_id)
 
@@ -175,6 +179,13 @@ def runtime_info(runtime_id: str) -> dict:
                 "auth": "JWT" if g.get("authorizerConfiguration") else "IAM"}
     except Exception:  # noqa: BLE001
         return {"protocol": "", "auth": ""}
+
+
+def runtime_mcp_url(arn: str) -> str:
+    """MCP 프로토콜 runtime 의 호출 URL (AgentCore Runtime MCP 규약)."""
+    from urllib.parse import quote
+    reg = arn.split(":")[3] if arn.count(":") > 3 else region()
+    return f"https://bedrock-agentcore.{reg}.amazonaws.com/runtimes/{quote(arn, safe='')}/invocations?qualifier=DEFAULT"
 
 
 def runtime_protocol(runtime_id: str) -> str:

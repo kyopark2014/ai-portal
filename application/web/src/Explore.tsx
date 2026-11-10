@@ -29,7 +29,7 @@ export function ago(ts: number): string {
 function subtitle(it: Item): string {
   const d = it.data;
   if (it.kind === "prompt") return d.model_id || "모델 미지정";
-  if (it.kind === "mcp") return d.kind === "gateway" ? `Gateway · ${d.region} · ${d.authorizer} · ${d.status}` : d.endpoint;
+  if (it.kind === "mcp") return d.kind === "gateway" ? `Gateway · ${d.region} · ${d.authorizer} · ${d.status}` : d.kind === "runtime" ? `runtime · ${d.auth} · ${d.status}` : d.endpoint;
   if (it.kind === "agent") return `${d.agent_type ?? "custom"}${d.status ? " · " + d.status : ""}`;
   return d.source_label || "";
 }
@@ -85,11 +85,21 @@ export default function Explore({ user }: { user: User }) {
   const isAdmin = user.role === "admin";
   const [sync, setSync] = useState<{ running: boolean; error: string } | null>(null);
 
+  const reqSeq = useRef(0);
   const load = useCallback(async () => {
+    // 늦게 도착한 이전 요청(다른 탭/검색어)의 응답이 현재 화면을 덮어쓰지 않도록 순번으로 걸러낸다.
+    const seq = ++reqSeq.current;
     setLoading(true); setErr("");
-    try { setItems(await api.listItems(kind, q)); } catch (e: any) { setErr(e.message); }
-    setLoading(false);
+    try {
+      const r = await api.listItems(kind, q);
+      if (seq === reqSeq.current) setItems(r);
+    } catch (e: any) { if (seq === reqSeq.current) setErr(e.message); }
+    if (seq === reqSeq.current) setLoading(false);
   }, [kind, q]);
+
+  // 비동기 콜백(동기화 폴링 등)이 항상 현재 탭 기준의 load를 호출하도록 최신 함수를 보관한다.
+  const loadRef = useRef(load);
+  loadRef.current = load;
 
   useEffect(() => { const t = setTimeout(load, q ? 250 : 0); return () => clearTimeout(t); }, [load, q]);
 
@@ -101,7 +111,7 @@ export default function Explore({ user }: { user: User }) {
         const s = await api.getSync();
         if (!alive) return;
         setSync(s);
-        if (was && !s.running) load();
+        if (was && !s.running) loadRef.current();
         was = s.running;
         if (s.running) setTimeout(tick, 1500);
       } catch { /* 무시 */ }
@@ -134,7 +144,7 @@ export default function Explore({ user }: { user: User }) {
     setSync({ running: true, error: "" });
     const poll = async () => {
       const s = await api.getSync(); setSync(s);
-      if (s.running) setTimeout(poll, 1500); else load();
+      if (s.running) setTimeout(poll, 1500); else loadRef.current();
     };
     setTimeout(poll, 800);
   }

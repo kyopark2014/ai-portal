@@ -47,6 +47,7 @@ export const remove = (kind: Kind, id: number) => callErr<{ ok: boolean }>(`/api
 export const getSync = () => callErr<{ running: boolean; last: number | null; error: string; added: Record<string, number> }>("/api/sync");
 export const syncNow = () => callErr<{ started: boolean }>("/api/sync", json("POST"));
 export const registerItem = (kind: Kind, id: number) => callErr<Item>(`/api/catalog/${kind}/${id}/register`, json("POST"));
+export const agentStatus = (id: number) => callErr<Item>(`/api/catalog/agent/${id}/status`, json("POST"));
 export const refreshRegistry = (kind: Kind, id: number) => callErr<Item & { registry_reason: string }>(`/api/catalog/${kind}/${id}/registry/refresh`, json("POST"));
 export const submitRegistry = (kind: Kind, id: number) => callErr<Item>(`/api/catalog/${kind}/${id}/registry/submit`, json("POST"));
 

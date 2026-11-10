@@ -140,6 +140,11 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
   const [usage, setUsage] = useState<api.UsageState | null>(null);
   const d = item.data;
 
+  // 생성 직후의 CREATING/UPDATING 은 동기화 전까지 갱신되지 않는다 → 열 때 한 번만 AWS 상태를 확인한다(폴링 없음)
+  useEffect(() => {
+    if (item.kind === "agent" && (d.status === "CREATING" || d.status === "UPDATING")) api.agentStatus(item.id).then(onChanged).catch(() => {});
+  }, [item.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => { api.registryInfo().then(setReg).catch(() => setReg({ registry_id: "", name: "", status: "", authorizer: "", auto_approval: null })); }, []);
 
   async function run<T>(fn: () => Promise<T>, ok?: (r: T) => void) {
@@ -229,7 +234,19 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
 
         {item.kind === "mcp" && usage && !usage.can_use && <p className="hint">사용 신청이 승인되면 이 MCP 를 테스트할 수 있습니다.</p>}
 
-        {item.kind === "mcp" && d.kind !== "gateway" && (usage?.can_use ?? true) && (<>
+        {item.kind === "mcp" && d.kind === "runtime" && (<>
+          <h3>AgentCore Runtime (MCP)</h3>
+          <dl className="kv">
+            <div><dt>상태</dt><dd>{d.status}</dd></div>
+            <div><dt>프로토콜</dt><dd>{d.protocol}</dd></div>
+            <div><dt>인증</dt><dd>{d.auth === "JWT" ? "JWT (Cognito 토큰)" : "IAM (SigV4)"}</dd></div>
+            <div><dt>리전</dt><dd>{d.region}</dd></div>
+            <div className="wide-row"><dt>ARN</dt><dd className="mono sm arn">{d.arn}</dd></div>
+            <div className="wide-row"><dt>MCP endpoint</dt><dd className="mono sm arn">{d.endpoint || "-"}</dd></div>
+          </dl>
+        </>)}
+
+        {item.kind === "mcp" && d.kind !== "gateway" && d.kind !== "runtime" && (usage?.can_use ?? true) && (<>
           <h3>Endpoint</h3><p className="mono">{d.endpoint}</p>
           {d.headers?.length > 0 && <p className="hint">헤더: {d.headers.map((h: any) => h.key).join(", ")} (값은 숨김)</p>}
           <div className="actions left"><button className="btn ghost" disabled={busy} onClick={() => run(() => api.testMcp(item.id), (r) => setOut(`initialize: HTTP ${r.status}\ntools/list: HTTP ${r.tools_status}\n\n${r.body}`))}>연결 테스트 (tools/list)</button></div>

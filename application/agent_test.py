@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import auth, aws, catalog, mcp_test, mcp_token, usage
+from . import auth, aws, catalog, db, mcp_test, mcp_token, usage
 
 router = APIRouter(prefix="/api")
 MAX_TURNS = 20
@@ -157,6 +157,8 @@ def chat(item_id: int, body: AgentChatIn, user: auth.User = Depends(auth.current
             st = aws.get_harness(arn.split("/")[-1])["status"]
         except Exception:  # noqa: BLE001 — 상태를 못 읽으면 호출을 시도해 본다
             st = "READY"
+        if st != (it["data"] or {}).get("status"):                # 방금 읽은 상태를 화면에도 반영한다(CREATING 으로 남지 않게)
+            db.update_item(it["id"], data={**it["data"], "status": st})
         if st != "READY":
             raise HTTPException(409, f"harness 가 아직 준비되지 않았습니다 (상태: {st}). 잠시 뒤 다시 시도하세요" if st in ("CREATING", "UPDATING")
                                 else f"harness 를 호출할 수 없는 상태입니다 ({st})")
