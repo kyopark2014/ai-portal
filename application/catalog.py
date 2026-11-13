@@ -360,7 +360,7 @@ def test_mcp(item_id: int, user: auth.User = Depends(auth.current_user)):
     import httpx
     it = visible_item(item_id, user, "mcp")
     from . import usage
-    usage.require_use(it, user)                                        # 사용 신청이 승인된 사람만 실제로 연결해 볼 수 있다
+    usage.require_test(it, user)                                       # 사용 승인된 사람만(IAM gateway 는 승인 없이) 실제로 연결해 볼 수 있다
     d = it["data"]
     if d.get("kind") == "runtime":
         raise HTTPException(422, "MCP runtime 은 IAM/JWT 인증이 필요해 포털에서 직접 호출할 수 없습니다")

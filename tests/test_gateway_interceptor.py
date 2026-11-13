@@ -79,7 +79,7 @@ def test_installer_gateway_params_match_the_api_model():
     exec("project_name='ai-portal'; region='us-west-2'; account_id='123456789012'\nfrom typing import *\nWEBSEARCH_REGION='us-east-1'\n" + consts + gp + cg, ns)
     model = botocore.session.get_session().create_client("bedrock-agentcore-control", region_name="us-west-2").meta.service_model
     checks = [("CreateGateway", ns["gateway_params"]("arn:aws:iam::1:role/r", "arn:aws:lambda:us-east-1:1:function:f", n))
-              for n in ("gw-ai-portal-iam", "gw-ai-portal-websearch-iam")]
+              for n in ("gw-ai-portal-iam", "gw-websearch-iam")]
     checks += [("CreateGatewayTarget", ns["target_params"]("gw-1", "https://example.com/mcp", ns["TARGET_NAME"])),
                ("CreateGatewayTarget", ns["websearch_target_params"]("gw-1"))]
     for op, params in checks:
@@ -118,7 +118,7 @@ def test_installer_gateway_params_match_the_api_model():
     assert ws["credentialProviderConfigurations"] == [{"credentialProviderType": "GATEWAY_IAM_ROLE"}]
     assert checks[0][1]["name"] == "gw-ai-portal-iam"
     assert ns["PORTAL_JWT_GATEWAY_NAME"] == "gw-ai-portal-jwt" and ns["PORTAL_IAM_GATEWAY_NAME"] == "gw-ai-portal-iam"
-    assert ns["WEBSEARCH_JWT_GATEWAY_NAME"] == "gw-ai-portal-websearch-jwt" and ns["WEBSEARCH_IAM_GATEWAY_NAME"] == "gw-ai-portal-websearch-iam"
+    assert ns["WEBSEARCH_JWT_GATEWAY_NAME"] == "gw-websearch-jwt" and ns["WEBSEARCH_IAM_GATEWAY_NAME"] == "gw-websearch-iam"
     assert ns["INTERCEPTOR_FUNCTION"] == "lambda-ai-portal-intercepter" and ns["WEBSEARCH_REGION"] == "us-east-1"
     # 기존 us-west-2 역할 이름은 바뀌지 않는다(이미 만든 리소스를 재사용해야 한다)
     assert ns["interceptor_role_name"]("us-west-2") == "role-lambda-interceptor-for-ai-portal-us-west-2"

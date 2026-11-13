@@ -103,8 +103,21 @@ export const decide = (id: string, decision: "APPROVED" | "REJECTED" | "DEPRECAT
     `/api/approvals/${encodeURIComponent(id)}/decision`, json("POST", { decision, reason }));
 
 // ── MCP 테스트 (harness agent) ──
+export interface McpAppPayload {
+  resourceUri: string;
+  html: string;
+  tool: string;
+  mcpServer?: string;
+  mimeType?: string;
+  csp?: Record<string, unknown>;
+  toolResult?: {
+    content: Array<{ type: string; text?: string; [key: string]: unknown }>;
+    isError?: boolean;
+  };
+}
 export interface McpEvent {
-  t?: string; tool_start?: string; tool_call?: string; input?: string; tool_result?: string; i?: number;
+  t?: string; tool_start?: string; tool_call?: string; input?: string; tool_result?: string; tool?: string;
+  mcpApp?: McpAppPayload; i?: number;
   stop?: string; done?: boolean; error?: string; status?: string; usage?: Record<string, number | null>;
 }
 export const mcpTestStatus = () => callErr<{ ready: boolean; harness_arn: string }>("/api/mcp/test-status");

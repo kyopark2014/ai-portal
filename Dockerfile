@@ -6,6 +6,14 @@ RUN npm ci
 COPY application/web/ .
 RUN npm run build
 
+# Stage 1b: playground(/playground) frontend build
+FROM node:22-alpine AS playground
+WORKDIR /pg
+COPY playground/package.json playground/package-lock.json ./
+RUN npm ci
+COPY playground/ .
+RUN npm run build
+
 # Stage 2: Python runtime
 FROM python:3.13-slim
 WORKDIR /app
@@ -14,6 +22,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY application/ /app/application/
 COPY --from=frontend /web/dist /app/application/web/dist
+COPY --from=playground /pg/dist /app/application/playground_web/dist
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin appuser \
     && mkdir -p /app/application/data && chown -R appuser:appuser /app
 USER appuser

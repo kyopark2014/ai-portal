@@ -48,6 +48,7 @@ ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "application" / "config.json"
 
 DDB_TABLE = project_name
+PLAYGROUND_DDB_TABLE = f"{project_name}-playground"
 NOTIFY_FUNCTION = f"{project_name}-approval-notify"
 NOTIFY_ROLE = f"role-lambda-notify-for-{project_name}-{region}"
 APPROVAL_RULE = f"{project_name}-approval-requested"
@@ -59,7 +60,9 @@ SSM_PARAMS = [f"/{project_name}/admins", f"/{project_name}/reviewers", f"/{proje
 GATEWAYS = [(f"gw-{project_name}-jwt", region),
             (f"gw-{project_name}-iam", region),
             (f"gw-{project_name}", region),
-            (f"gw-{project_name}-websearch-jwt", WEBSEARCH_REGION),
+            ("gw-websearch-jwt", WEBSEARCH_REGION),
+            ("gw-websearch-iam", WEBSEARCH_REGION),
+            (f"gw-{project_name}-websearch-jwt", WEBSEARCH_REGION),     # 예전 이름(남아 있으면 같이 지운다)
             (f"gw-{project_name}-websearch-iam", WEBSEARCH_REGION)]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -421,17 +424,18 @@ def delete_registry() -> None:
 
 
 def delete_table() -> None:
-    logger.info("[T] DynamoDB 테이블 '%s'", DDB_TABLE)
     ddb = session.client("dynamodb")
-    try:
-        ddb.describe_table(TableName=DDB_TABLE)
-    except ClientError as e:
-        if _gone(e):
-            logger.info("  테이블 없음")
-            return
-        raise
-    attempt("삭제 보호 해제", lambda: ddb.update_table(TableName=DDB_TABLE, DeletionProtectionEnabled=False))
-    attempt(f"테이블 {DDB_TABLE}", lambda: ddb.delete_table(TableName=DDB_TABLE))
+    for name in (PLAYGROUND_DDB_TABLE, DDB_TABLE):
+        logger.info("[T] DynamoDB 테이블 '%s'", name)
+        try:
+            ddb.describe_table(TableName=name)
+        except ClientError as e:
+            if _gone(e):
+                logger.info("  테이블 없음")
+                continue
+            raise
+        attempt("삭제 보호 해제", lambda name=name: ddb.update_table(TableName=name, DeletionProtectionEnabled=False))
+        attempt(f"테이블 {name}", lambda name=name: ddb.delete_table(TableName=name))
 
 
 def delete_cognito() -> None:

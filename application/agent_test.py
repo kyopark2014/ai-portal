@@ -109,8 +109,24 @@ def _runtime_events(arn: str, payload: bytes, session: str, user: auth.User) -> 
             streamed = True
             yield {"t": e["data"]}
         elif "toolResult" in e:
-            yield {"tool_call": e.get("tool", "tool"), "input": ""}
-            yield {"tool_result": str(e["toolResult"])[:4000]}
+            from . import mcp_apps_host
+
+            tool_name = e.get("tool", "tool")
+            result_text = str(e["toolResult"])
+            yield {"tool_call": tool_name, "input": ""}
+            payload = {"tool_result": result_text[:4000], "tool": tool_name}
+            # agentic-work 등은 truncate 된 toolResult 와 별도로 완전한 mcpApp 을 보낸다.
+            # 있으면 그대로 전달하고, 없을 때만 완전 JSON 으로 fallback(또는 weather 재조회)한다.
+            mcp_app = e.get("mcpApp")
+            if not (isinstance(mcp_app, dict) and mcp_app.get("html")):
+                mcp_app = mcp_apps_host.build_app_payload_if_ready(tool_name, result_text)
+                if not mcp_app:
+                    refilled = mcp_apps_host.refill_weather_tool_result(tool_name)
+                    if refilled:
+                        mcp_app = mcp_apps_host.build_app_payload_if_ready(tool_name, refilled)
+            if mcp_app:
+                payload["mcpApp"] = mcp_app
+            yield payload
         elif "result" in e and not streamed:      # 스트리밍 조각 없이 최종 결과만 온 경우
             msgs = (e["result"] or {}).get("messages") or []
             if msgs:
@@ -140,15 +156,30 @@ def _harness_events(arn: str, history: list[dict], user: auth.User, session: str
     yield from mcp_test.relay_harness_stream(r["stream"])
 
 
-@router.post("/agents/{item_id}/chat")
-def chat(item_id: int, body: AgentChatIn, user: auth.User = Depends(auth.current_user)):
+def history_of(body: AgentChatIn) -> list[dict]:
+    """요청의 대화 이력을 검증해 정리한다(포털 테스트와 Playground 가 함께 쓴다)."""
     history = clean_history(body.messages)
     if history[-1]["role"] != "user":
         raise HTTPException(422, "마지막 메시지는 user 여야 합니다")
     if sum(len(m["content"]) for m in history) > MAX_CHARS:
         raise HTTPException(422, "대화가 너무 깁니다. 새 대화를 시작하세요")
+    return history
+
+
+@router.post("/agents/{item_id}/chat")
+def chat(item_id: int, body: AgentChatIn, user: auth.User = Depends(auth.current_user)):
+    history = history_of(body)
     it = catalog.visible_item(item_id, user, "agent")
-    usage.require_use(it, user)                                   # 사용 신청이 승인된 사람(소유자 포함)만 대화할 수 있다
+    usage.require_test(it, user)             # IAM 은 승인 없이, JWT(사용자의 Cognito 토큰으로 호출)는 사용 승인 뒤에만 (볼 수 없는 항목은 404)
+    return stream_agent(it, history, body.session_id, user, prompt_id=body.prompt_id)
+
+
+def agent_events(it: dict, history: list[dict], session_id: str, user: auth.User,
+                 prompt_id: int | None = None, with_system: bool = True) -> Iterator[dict]:
+    """agent(harness/runtime)를 호출해 정규화된 이벤트(t / tool_call / tool_result / error …)를 낸다.
+
+    호출 권한 검사는 호출한 쪽에서 끝낸 뒤 부른다. 준비 상태 검사처럼 시작 전에 알 수 있는 오류는 HTTPException 으로 **바로** 던진다
+    (스트림이 시작되기 전이라 HTTP 상태로 알려진다). with_system=False 면 harness 에 systemPrompt 를 넘기지 않아 agent 자체의 prompt 를 쓴다(Playground)."""
     kind, arn = target_of(it)
     jwt = kind == "harness" and (it["data"] or {}).get("auth") == "JWT"
     bearer = mcp_token.issue(user.email)["access_token"] if jwt else None   # 이 요청에만 쓸 토큰 (저장·로그하지 않는다)
@@ -162,22 +193,29 @@ def chat(item_id: int, body: AgentChatIn, user: auth.User = Depends(auth.current
         if st != "READY":
             raise HTTPException(409, f"harness 가 아직 준비되지 않았습니다 (상태: {st}). 잠시 뒤 다시 시도하세요" if st in ("CREATING", "UPDATING")
                                 else f"harness 를 호출할 수 없는 상태입니다 ({st})")
-    system = catalog.harness_system_prompt(user, body.prompt_id) if kind == "harness" else None   # runtime 에는 해당 없음
+    system = catalog.harness_system_prompt(user, prompt_id) if kind == "harness" and with_system else None   # runtime 에는 해당 없음
     # 사용자별로 세션을 분리해 다른 사용자의 agent 세션/메모리를 재사용하지 못하게 한다
-    session = f"{uuid.uuid5(uuid.NAMESPACE_URL, user.email)}-{body.session_id}"[:100]
+    session = f"{uuid.uuid5(uuid.NAMESPACE_URL, user.email)}-{session_id}"[:100]
+    if kind == "harness":
+        return _harness_events(arn, history, user, session, system, bearer)
+    return _runtime_events(arn, _runtime_payload(history[-1]["content"], history, user, session), session, user)
 
-    def sse() -> Iterator[bytes]:
-        def enc(e: dict) -> bytes:
-            return f"data: {json.dumps(e, ensure_ascii=False)}\n\n".encode()
-        try:
-            src = (_harness_events(arn, history, user, session, system, bearer) if kind == "harness"
-                   else _runtime_events(arn, _runtime_payload(history[-1]["content"], history, user, session), session, user))
-            for ev in src:
-                yield enc(ev)
-            yield enc({"done": True})
-        except Exception as e:  # noqa: BLE001 — botocore 오류를 사용자 메시지로
-            msg = getattr(e, "response", {}).get("Error", {}).get("Message") if hasattr(e, "response") else None
-            yield enc({"error": (msg or str(e) or type(e).__name__)[:400]})
 
-    return StreamingResponse(sse(), media_type="text/event-stream",
+def stream_agent(it: dict, history: list[dict], session_id: str, user: auth.User,
+                 prompt_id: int | None = None, with_system: bool = True) -> StreamingResponse:
+    """agent_events 를 SSE 로 중계한다(포털 테스트 화면용)."""
+    src = agent_events(it, history, session_id, user, prompt_id, with_system)     # 준비 안 된 harness 등은 여기서 HTTP 오류로 끝난다
+    return StreamingResponse(sse_bytes(src), media_type="text/event-stream",
                              headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+
+def sse_bytes(src: Iterator[dict]) -> Iterator[bytes]:
+    def enc(e: dict) -> bytes:
+        return f"data: {json.dumps(e, ensure_ascii=False)}\n\n".encode()
+    try:
+        for ev in src:
+            yield enc(ev)
+        yield enc({"done": True})
+    except Exception as e:  # noqa: BLE001 — botocore 오류를 사용자 메시지로
+        msg = getattr(e, "response", {}).get("Error", {}).get("Message") if hasattr(e, "response") else None
+        yield enc({"error": (msg or str(e) or type(e).__name__)[:400]})

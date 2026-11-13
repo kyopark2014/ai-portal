@@ -6,3 +6,4 @@ config.json
 application/web/dist
 application/data
 **/__pycache__
+playground/dist

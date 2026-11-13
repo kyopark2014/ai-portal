@@ -74,6 +74,21 @@ def can_use(item: dict, user: auth.User) -> bool:
     return bool(r and r["status"] == "APPROVED")
 
 
+def test_without_approval(item: dict) -> bool:
+    """사용 승인 없이 포털에서 테스트해 볼 수 있는가. IAM 인증은 포털(harness)의 IAM 역할로 호출하므로 승인이 필요 없다.
+    JWT 는 접속한 사용자의 Cognito 토큰으로, 직접 등록한 MCP 는 사용자가 넣은 헤더로 호출하므로 승인 뒤에만 시험할 수 있다."""
+    d = item.get("data") or {}
+    if item["kind"] == "agent":
+        return d.get("auth") != "JWT"
+    return item["kind"] == "mcp" and ((d.get("kind") == "gateway" and d.get("authorizer") == "AWS_IAM")
+                                      or (d.get("kind") == "runtime" and d.get("auth") != "JWT"))
+
+
+def require_test(item: dict, user: auth.User) -> None:
+    if not test_without_approval(item):
+        require_use(item, user)
+
+
 def require_use(item: dict, user: auth.User) -> None:
     if not can_use(item, user):
         raise HTTPException(403, f"이 {_LABEL.get(item['kind'], '항목')} 를 사용하려면 사용 신청이 승인되어야 합니다")

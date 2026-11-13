@@ -47,7 +47,15 @@ def tool_for(item: dict, bearer: str | None = None) -> dict:
     d = item["data"]
     name = _TOOLNAME.sub("_", item["name"])[:40] or "mcp"
     if d.get("kind") == "runtime":
-        raise HTTPException(422, "MCP runtime 은 IAM/JWT 인증이 필요해 포털에서 직접 테스트할 수 없습니다")
+        if d.get("auth") == "JWT":                      # runtime 은 인터셉터를 거치지 않는다 — 사용 승인은 포털이 이미 확인했다
+            if not bearer:
+                raise HTTPException(422, "JWT 인증 MCP 를 테스트하려면 접속 토큰이 필요합니다")
+            return {"type": "remote_mcp", "name": name, "config": {"remoteMcp": {"url": d["endpoint"], "headers": {"Authorization": f"Bearer {bearer}"}}}}
+        gid = catalog.config_value("gateway_iam_id")      # IAM runtime: IAM Gateway 의 target 으로 붙여 gateway 도구로 호출한다
+        if not gid:
+            raise HTTPException(503, "IAM Gateway(gateway_iam_id)가 설정되어 있지 않습니다")
+        arn = f"arn:aws:bedrock-agentcore:{aws.region()}:{aws.account_id()}:gateway/{gid}"
+        return {"type": "agentcore_gateway", "name": name, "config": {"agentCoreGateway": {"gatewayArn": arn}}}
     if d.get("kind") == "gateway" and d.get("authorizer") == "CUSTOM_JWT":
         if not bearer:
             raise HTTPException(422, "JWT 인증 Gateway 를 테스트하려면 접속 토큰이 필요합니다")
@@ -71,7 +79,13 @@ def tool_for(item: dict, bearer: str | None = None) -> dict:
 
 def relay_harness_stream(stream) -> Iterator[dict]:
     """InvokeHarness 이벤트 스트림 → 정규화 이벤트(t / tool_start / tool_call / tool_result / stop / done / error)."""
+    from . import mcp_apps_host
+
     tools: dict[int, dict] = {}
+    tool_results: dict[int, str] = {}
+    mcp_app_sent: set[int] = set()
+    last_tool_name = ""
+    last_tool_input = ""
     result_len = 0
     for ev in stream:
         if "contentBlockStart" in ev:
@@ -79,6 +93,7 @@ def relay_harness_stream(stream) -> Iterator[dict]:
             idx = ev["contentBlockStart"].get("contentBlockIndex", 0)
             if "toolUse" in st:
                 tools[idx] = {"name": st["toolUse"].get("name", ""), "input": ""}
+                last_tool_name = tools[idx]["name"] or last_tool_name
                 yield {"tool_start": tools[idx]["name"], "i": idx}
         elif "contentBlockDelta" in ev:
             idx = ev["contentBlockDelta"].get("contentBlockIndex", 0)
@@ -88,16 +103,67 @@ def relay_harness_stream(stream) -> Iterator[dict]:
             elif "toolUse" in dl and idx in tools:
                 tools[idx]["input"] += dl["toolUse"].get("input", "")
             elif "toolResult" in dl:
-                out = "".join(b.get("text", "") for b in dl["toolResult"] if isinstance(b, dict))
-                room = max(0, 8000 - result_len)          # 화면/브라우저 보호: 결과 전체를 8000자로 제한
-                result_len += len(out)
-                if room:
-                    yield {"tool_result": out[:room], "i": idx}
+                chunk = "".join(b.get("text", "") for b in dl["toolResult"] if isinstance(b, dict))
+                tool_results[idx] = tool_results.get(idx, "") + chunk
+                full = tool_results[idx]
+                room = max(0, 8000 - result_len)          # 화면/브라우저 보호: 결과 텍스트는 8000자로 제한
+                result_len += len(chunk)
+                # agentic-work 와 같이 완전한 JSON 일 때만 mcpApp 을 붙인다.
+                # 잘린 조각으로 빈 예보 iframe 이 먼저 마운트되지 않게 한다.
+                mcp_app = mcp_apps_host.build_app_payload_if_ready(last_tool_name, full)
+                if room or mcp_app:
+                    payload = {
+                        "tool_result": chunk[:room] if room else "",
+                        "i": idx,
+                        "tool": last_tool_name or None,
+                    }
+                    if mcp_app:
+                        payload["mcpApp"] = mcp_app
+                        mcp_app_sent.add(idx)
+                    yield payload
         elif "contentBlockStop" in ev:
             idx = ev["contentBlockStop"].get("contentBlockIndex", 0)
-            if idx in tools and tools[idx]["input"]:
-                yield {"tool_call": tools[idx]["name"], "input": tools[idx]["input"][:2000], "i": idx}
+            # 입력이 비어 있어도 tool_call 을 낸다(인자 없는 도구). playground 는 tool_start 카드를 이걸로 upsert 한다.
+            if idx in tools:
+                t = tools.pop(idx)
+                last_tool_name = t["name"] or last_tool_name
+                last_tool_input = t["input"]
+                yield {"tool_call": t["name"], "input": t["input"][:2000], "i": idx}
+            elif idx in tool_results and idx not in mcp_app_sent:
+                # 스트림이 잘려 완전 JSON 을 못 받은 weather 결과는 로컬로 다시 채워 iframe 에 넘긴다.
+                full = tool_results[idx]
+                text = full
+                mcp_app = mcp_apps_host.build_app_payload_if_ready(last_tool_name, text)
+                if not mcp_app:
+                    refilled = mcp_apps_host.refill_weather_tool_result(last_tool_name, last_tool_input)
+                    if refilled:
+                        text = refilled
+                        mcp_app = mcp_apps_host.build_app_payload_if_ready(last_tool_name, text)
+                if mcp_app:
+                    mcp_app_sent.add(idx)
+                    yield {
+                        "tool_result": "",
+                        "i": idx,
+                        "tool": last_tool_name or None,
+                        "mcpApp": mcp_app,
+                    }
         elif "messageStop" in ev:
+            for idx, full in list(tool_results.items()):
+                if idx in mcp_app_sent:
+                    continue
+                mcp_app = mcp_apps_host.build_app_payload_if_ready(last_tool_name, full)
+                if not mcp_app:
+                    refilled = mcp_apps_host.refill_weather_tool_result(last_tool_name, last_tool_input)
+                    if refilled:
+                        mcp_app = mcp_apps_host.build_app_payload_if_ready(last_tool_name, refilled)
+                if mcp_app:
+                    mcp_app_sent.add(idx)
+                    yield {
+                        "tool_result": "",
+                        "i": idx,
+                        "tool": last_tool_name or None,
+                        "mcpApp": mcp_app,
+                    }
             yield {"stop": ev["messageStop"].get("stopReason")}
         elif "metadata" in ev:
             u = ev["metadata"].get("usage", {})
@@ -239,7 +305,7 @@ def _prepare(item_id: int, kind: str, body: McpChatIn, user: auth.User) -> tuple
         raise HTTPException(422, "대화가 너무 깁니다. 새 대화를 시작하세요")
     it = catalog.visible_item(item_id, user, kind)
     from . import usage
-    usage.require_use(it, user)                                        # MCP 는 사용 신청이 승인된 사람만 harness 로 호출해 볼 수 있다
+    usage.require_test(it, user)                                       # IAM gateway 는 승인 없이, 그 외 MCP 는 사용 승인 뒤에만 harness 로 호출해 볼 수 있다
     arn = harness_arn()
     if not arn:
         raise HTTPException(503, "테스트용 harness 가 없습니다. `python installer.py --harness-only` 를 실행하세요")
@@ -250,7 +316,16 @@ def _prepare(item_id: int, kind: str, body: McpChatIn, user: auth.User) -> tuple
 def chat(item_id: int, body: McpChatIn, user: auth.User = Depends(auth.current_user)):
     it, arn, history = _prepare(item_id, "mcp", body, user)
     bearer = None
-    if (it["data"] or {}).get("kind") == "gateway" and it["data"].get("authorizer") == "CUSTOM_JWT":
+    d = it["data"] or {}
+    if d.get("kind") == "runtime" and d.get("auth") != "JWT":
+        try:
+            aws.ensure_runtime_gateway_target(catalog.config_value("gateway_iam_id"), it["name"], d.get("endpoint", ""))
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f"Gateway target 준비 실패: {str(e)[:300]}")
+    elif d.get("kind") == "runtime":
+        from . import mcp_token
+        bearer = mcp_token.issue(user.email)["access_token"]
+    if d.get("kind") == "gateway" and d.get("authorizer") == "CUSTOM_JWT":
         from . import mcp_token
         gid = it["data"].get("gateway_id", "")
         mcp_token.grant(user.email, gid)                              # 사용 승인된 사람(또는 소유자)만 여기까지 온다 → 그룹을 맞춘다

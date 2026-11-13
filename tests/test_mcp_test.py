@@ -148,3 +148,20 @@ def test_harness_stream_keeps_text_and_tools_in_arrival_order_with_reused_block_
         kinds.append(("t:" + e["t"]) if "t" in e else ("call:" + e["input"]) if "tool_call" in e
                      else ("res:" + e["tool_result"]) if "tool_result" in e else None)
     assert [k for k in kinds if k] == ["t:A먼저", 'call:{"q":"1"}', "res:R1", "t:B중간", 'call:{"q":"2"}', "res:R2", "t:C끝"]
+
+
+def test_only_iam_gateways_can_be_tested_without_usage_approval(env, monkeypatch):
+    class RT:
+        def invoke_harness(self, **kw): raise RuntimeError("stop")
+    monkeypatch.setattr(aws.boto3, "client", lambda *a, **k: RT())
+    body = {"session_id": "s" * 36, "messages": [{"role": "user", "content": "go"}]}
+    def mk(data, name):
+        return db.insert_item("mcp", name, "", "a@x.com", data)                     # 소유자, 사용 승인 없음
+    iam = mk({"kind": "gateway", "authorizer": "AWS_IAM", "gateway_id": "gw-i", "region": "us-west-2", "endpoint": "https://i/mcp"}, "iam")
+    jwt = mk({"kind": "gateway", "authorizer": "CUSTOM_JWT", "gateway_id": "gw-j", "region": "us-west-2", "endpoint": "https://j/mcp"}, "jwt")
+    direct = mk({"endpoint": "https://d/mcp", "headers": []}, "direct")
+    c = client("a@x.com")
+    assert c.post(f"/api/mcp/{iam}/chat", json=body).status_code == 200            # IAM gateway: 승인 없이 가능
+    assert c.post(f"/api/mcp/{jwt}/chat", json=body).status_code == 403            # JWT: 사용자 토큰으로 호출하므로 승인 뒤에만
+    assert c.post(f"/api/mcp/{direct}/chat", json=body).status_code == 403         # 직접 등록한 MCP: 헤더(인증 정보) 때문에 승인 뒤에만
+    assert client("b@x.com").post(f"/api/mcp/{iam}/chat", json=body).status_code == 404   # 남의 미등록 항목은 안 보인다

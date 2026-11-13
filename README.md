@@ -58,7 +58,7 @@ flowchart LR
 
   subgraph East["AgentCore + Cognito (us-east-1)"]
     COG["Cognito ai-portal-users<br/>Google IdP · OAuth code flow"]
-    GW2["Gateway gw-ai-portal-websearch-jwt<br/>CUSTOM_JWT"]
+    GW2["Gateway gw-websearch-jwt<br/>CUSTOM_JWT"]
     INT["Lambda 인터셉터<br/>사용 승인 확인"]
     WS["web-search connector"]
   end
@@ -221,7 +221,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.example .env     # GOOGLE_CLIENT_ID, LLM_GATEWAY_KEY 등 입력
 ./run_local.sh           # http://localhost:8501  (프런트 빌드 + uvicorn)
 ```
-- Google Cloud Console → OAuth client → **Authorized JavaScript origins** 에 `http://localhost:8501` 과 배포 오리진을 추가해야 로그인됩니다.
+- Google Cloud Console → OAuth client → **Authorized JavaScript origins** 에 `http://localhost`·`http://localhost:8501` 과 배포 오리진을 추가해야 로그인됩니다. (로컬 HTTP 에서는 Referrer-Policy 가 `no-referrer` 이면 GIS 로그인이 실패할 수 있어 `strict-origin-when-cross-origin` 을 씁니다.)
 - 프런트만 개발: `cd application/web && npm run dev` (:5173, `/api` 는 :8501 로 프록시)
 - 테스트: `pip install -r requirements-dev.txt && .venv/bin/python -m pytest` (테스트는 실제 AWS 를 호출하면 실패하도록 막혀 있음). 같은 전체 테스트를 DynamoDB 구현(moto)으로 돌리려면 `TEST_STORE=dynamodb pytest --ignore=tests/test_store_parity.py`. `test_store_parity.py` 는 두 저장소가 같은 결과를 내는지 직접 비교합니다.
 - AWS 자격 증명과 리전(`AWS_REGION`, 기본 `us-west-2`)이 필요합니다.
@@ -281,6 +281,21 @@ cp .env.example .env     # GOOGLE_CLIENT_ID, LLM_GATEWAY_KEY 등 입력
 - **가시성**: 관리자는 모든 항목을 봅니다. **일반 사용자는 자기가 만든 항목과 Registry 에서 승인(APPROVED)된 항목만** 봅니다(거절·deprecated 된 남의 항목은 숨김, 내가 만든 항목은 상태와 무관하게 보임). 목록·검색뿐 아니라 ID 로 접근하는 모든 API(수정·삭제·등록·테스트 등)에 같은 규칙을 적용하며, 숨겨진 항목은 403 이 아니라 404 로 응답해 존재 여부를 알리지 않습니다. 승인된 남의 항목은 보고 테스트에 쓸 수 있지만 수정·삭제는 불가.
 - **권한**: 수정·삭제·등록은 소유자 또는 관리자.
 
+## Playground (`/playground`)
+
+포털에서 만든 Agent 를 대화로 시험하는 web UI 입니다([playground/](playground/), React). [cde-pilot](../cde-pilot) 의 Agent UI 와 같은 구성입니다 — 왼쪽 사이드바(task 목록 · New task · agent 선택 · Appearance), 말풍선 없이 본문 폭으로 그리는 agent 응답(도구 호출/결과는 접이식 카드), 아래의 둥근 입력창. 기능은 최소화했습니다: 모델 선택, wiki, knowledge graph, skill·MCP·memory 선택, 파일·이미지 첨부가 없고, **agent 만 순수하게 호출**합니다(포털의 기본 system prompt 도 얹지 않아 agent 자체의 prompt 를 씁니다).
+
+- **진입:** 포털에서 Agent 를 열면 «사용 방법»에 `Playground` 버튼이 보입니다(사용 신청이 승인된 사용자에게만). 누르면 새 탭에서 `/playground/<agent id>` 가 열립니다.
+- **같은 컨테이너·같은 도메인(`<도메인>/playground`)·같은 세션 쿠키.** 포털에서 로그인했다면 그대로 열리고, 직접 열면 사용자별로 Google 로그인합니다.
+- **사용 승인 필수:** 포털 상세 화면의 테스트와 달리 IAM 인증 Agent 여도 **사용 신청이 승인된 Agent 만** 목록에 나오고 호출됩니다.
+- **응답 중 추가 입력은 대기열(queue)에 쌓입니다**(cde-pilot 과 같은 동작). 입력창 위에 목록으로 보이고, 응답이 끝나면 **순서대로 하나씩** 이어서 보냅니다. 항목마다 `↩`(진행 중인 응답을 **멈추고 이 메시지로 전환**)와 휴지통(삭제)이 있습니다. 응답을 직접 **중지**하면 대기열도 멈추고 «Queue paused because you interrupted» 와 `Resume` 이 나타나며, Resume 을 누르면 이어서 보냅니다. 대기열은 task 별로 이 브라우저 탭에만 있습니다(새로고침하면 사라지고, 이미 보낸 대화만 서버에 남습니다).
+- **중지해도 받은 만큼 저장됩니다.** 중지는 클라이언트가 연결을 끊는 것인데, Starlette 은 이때 스레드풀의 동기 제너레이터를 닫지 않아 `finally` 의 저장이 실행되지 않습니다. 그래서 agent 스트림 소비와 저장을 별도 스레드(`playground_api.chat` 의 `pump`)가 맡고, 끊기면 agent 스트림을 닫은 뒤 저장합니다.
+- **대화(task)는 사용자 · agent 별로 저장합니다.** 사이드바에는 선택한 agent 의 내 task 만 보이고, 새로고침해도 이어서 대화할 수 있습니다. 첫 질문이 제목이 되고, 이름 변경 · 고정(Pin) · 삭제를 지원합니다. 다른 사용자의 task 나 다른 agent 의 task 는 없는 것과 같습니다(404). task 하나가 agent 세션 하나입니다.
+- **저장소:** DynamoDB 테이블 `ai-portal-playground`(배포) / SQLite(로컬·테스트, `PORTAL_STORE=sqlite`). 포털 본 테이블과 분리해 두었고 `installer.py` 가 만듭니다(삭제 보호 · PITR 포함). 키는 `USER#<email> | TASK#<id>`(task)와 `TASK#<id> | MSG#<seq>`(메시지)입니다. 응답이 오류로 끝나 아무것도 받지 못했다면 질문도 저장하지 않아 다시 보낼 수 있습니다.
+- **API:** `GET /api/playground/agents` · `GET .../agents/{id}` · `GET|POST .../agents/{id}/tasks` · `GET|PATCH|DELETE .../tasks/{task}` · `POST .../tasks/{task}/chat`(SSE). 호출 로직은 포털의 Agent 테스트(`agent_test.agent_events`)를 그대로 씁니다.
+- **빌드:** 루트 `Dockerfile` 의 `playground` 단계가 [playground/](playground/) 를 빌드해 `application/playground_web/dist` 로 넣습니다. 로컬은 `./run_local.sh` 가 함께 빌드하고, 개발 서버는 `cd playground && npm run dev`(:5174, `/api` 는 :8501 로 프록시).
+- **디자인:** [playground/src/styles.css](playground/src/styles.css) 는 cde-pilot 의 `agent.css` 에서 이 화면에 쓰는 규칙만 옮긴 것입니다(Apache-2.0). 라이트/다크는 Appearance 로 바꿉니다(이 브라우저에만 기억).
+
 ## Agent의 생성
 
 포털 UI의 **에이전트 생성** 마법사는 `POST /api/agents/create`(`application/agent_create.py`의 `create`)로 AgentCore **harness** 를 만듭니다. 처리 순서는 다음과 같습니다.
@@ -302,7 +317,7 @@ cp .env.example .env     # GOOGLE_CLIENT_ID, LLM_GATEWAY_KEY 등 입력
 python installer.py --registry-only        # Registry `ai-portal` 만
 python installer.py --notifications-only   # 승인 요청 메일 알림만
 python installer.py --harness-only         # MCP 테스트용 harness agent `ai_portal` 만
-python installer.py --gateway-only         # AgentCore Gateway `gw-ai-portal-jwt`·`gw-ai-portal-iam`·`gw-ai-portal-websearch-jwt`·`gw-ai-portal-websearch-iam`(+ target, interceptor Lambda) 만
+python installer.py --gateway-only         # AgentCore Gateway `gw-ai-portal-jwt`·`gw-ai-portal-iam`·`gw-websearch-jwt`·`gw-websearch-iam`(+ target, interceptor Lambda) 만
 python installer.py --table-only           # DynamoDB 저장소 테이블만
 python installer.py --domain-only          # 커스텀 도메인(인증서·CloudFront 별칭·DNS)만
 python installer.py                        # 전체 (VPC·ALB·ECR·ECS Fargate·CloudFront)
@@ -316,13 +331,13 @@ python installer.py --skip-docker-build    # 이미지 재빌드 없이
   |---|---|---|---|
   | `gw-ai-portal-jwt` | us-west-2 | `knowledge-mcp` — MCP server(`TARGET_MCP_ENDPOINT`, https 필수, 기본 `https://knowledge-mcp.global.api.aws`) + `hr-advisor`(HR Advisor MCP runtime, `--hr-only`) | **CUSTOM_JWT, IdP=Cognito**. `config.json` 의 `gateway_*` |
   | `gw-ai-portal-iam` | us-west-2 | `gw-ai-portal-jwt` 와 같은 target(`knowledge-mcp` · `hr-advisor`) | **AWS_IAM**(SigV4). `config.json` 의 `gateway_iam_*` |
-  | `gw-ai-portal-websearch-jwt` | us-east-1 | `target-ai-portal-websearch` — AWS 관리형 **web-search connector**(`connectorId=web-search`, `GATEWAY_IAM_ROLE`) | **CUSTOM_JWT, IdP=Cognito**(`ai-portal-users`, 풀 안에서 Google federation): `discoveryUrl`=풀의 OpenID 설정, `allowedClients=[Cognito 앱 클라이언트 ID]`. 인터셉터(`passRequestHeaders=true`)가 토큰의 사용자를 이메일로 찾아 포털의 승인자 목록과 맞춰 봅니다. 역할에 `bedrock-agentcore:InvokeWebSearch` 필요 |
-  | `gw-ai-portal-websearch-iam` | us-east-1 | `target-ai-portal-websearch` — AWS 관리형 **web-search connector**(`connectorId=web-search`, `GATEWAY_IAM_ROLE`) | **AWS_IAM**(SigV4). 에이전트 생성에 붙일 수 있는 web-search gateway |
+  | `gw-websearch-jwt` | us-east-1 | `target-ai-portal-websearch` — AWS 관리형 **web-search connector**(`connectorId=web-search`, `GATEWAY_IAM_ROLE`) | **CUSTOM_JWT, IdP=Cognito**(`ai-portal-users`, 풀 안에서 Google federation): `discoveryUrl`=풀의 OpenID 설정, `allowedClients=[Cognito 앱 클라이언트 ID]`. 인터셉터(`passRequestHeaders=true`)가 토큰의 사용자를 이메일로 찾아 포털의 승인자 목록과 맞춰 봅니다. 역할에 `bedrock-agentcore:InvokeWebSearch` 필요 |
+  | `gw-websearch-iam` | us-east-1 | `target-ai-portal-websearch` — AWS 관리형 **web-search connector**(`connectorId=web-search`, `GATEWAY_IAM_ROLE`) | **AWS_IAM**(SigV4). 에이전트 생성에 붙일 수 있는 web-search gateway |
 
   두 web-search gateway 의 description 은 "Websearch를 위한 AgentCore MCP gateway 입니다." 입니다. gateway 이름은 `UpdateGateway` 로 바꿀 수 없어서, 이름이 바뀐 gateway(`gw-ai-portal`·`gw-ai-portal-us-west-2`·`gw-ai-portal-us-east-1` 등 예전 것)는 설치기가 새로 만들고 예전 것은 남겨 두므로 필요 없으면 직접 지웁니다.
 
-  **interceptor**(`interceptorConfigurations`)는 Lambda `lambda-ai-portal-intercepter`(`lambda-interceptor/`, 철자는 요청대로)를 **각 gateway 와 같은 리전에** 두고 `REQUEST`·`RESPONSE` 양쪽에 연결하며 `passRequestHeaders=false` 라 SigV4 서명 헤더는 넘기지 않습니다. Lambda 는 **IAM Gateway(`gw-ai-portal-iam`, `gw-ai-portal-websearch-iam`)의 요청은 그대로 통과**시키고(JWT Gateway 의 승인 검사는 아래 «MCP 접속 토큰» 참고) 모든 요청에 대해 CloudWatch Logs 에 **호출자(IAM principal ARN, 이벤트의 `context.identity.awsPrincipalArn`)**·메서드·tool 이름·인자 **이름**·응답 상태만 남깁니다(인자 값·응답 본문·서명은 남기지 않음). 포털의 MCP 테스트처럼 harness 가 호출하면 호출자는 harness 실행 역할로 보이며 포털 사용자 이메일은 나오지 않습니다. accept/block 판단은 `decide()` 에 모여 있고, block 은 target 으로 보내지 않고 JSON-RPC 오류를 바로 돌려줍니다. 역할은 리전별로 `role-gateway-for-ai-portal-<region>`(인터셉터 호출 + us-east-1 은 web search), `role-lambda-interceptor-for-ai-portal-<region>`(로그 쓰기만). 포털 리전 gateway 의 ID/URL 만 `config.json`(`gateway_id`·`gateway_url`)에 두고, websearch gateway 는 이름으로 AWS 에서 찾아 재사용합니다. 이미 있으면 재사용하므로 여러 번 실행해도 됩니다. **인증 방식은 만든 뒤 바꾸지 않습니다**(바꾸려면 gateway 와 target 을 지우고 다시 실행; installer 가 불일치를 감지하면 중단). IAM 과 JWT 는 함께 쓸 수 없어서, JWT gateway 는 `mcp-proxy-for-aws`(SigV4) 같은 IAM 프록시로 접속할 수 없고 `Authorization: Bearer <Google ID 토큰>` 이 필요합니다. **주의**: gateway 이름은 `UpdateGateway` 로 바꿀 수 없어서(`Name cannot be updated`), 예전 이름(`gw-ai-portal`, `gw-ai-portal-websearch`)으로 만든 것은 새 이름으로 새로 만들었고 옛 것은 직접 지워야 합니다.
-- **MCP 접속 토큰 (Gateway 인증 = Cognito JWT)**: `gw-ai-portal-websearch-jwt` 은 Cognito 사용자 풀 `ai-portal-users`(us-east-1)가 발급한 JWT 만 받습니다. 브라우저 로그인(OAuth)은 Cognito 가 **Google 을 Identity Provider 로 federation** 해서 처리하고(아래 «MCP - OAuth 인증» 참고), 포털 화면에서 받는 접속 토큰은 포털의 Google 로그인으로 신원을 확인한 뒤 포털이 로그인한 사용자를 Cognito 에 만들며(`AdminCreateUser`, 비밀번호는 아무도 모르는 무작위 값; 셀프 가입 금지) 토큰도 서버가 `AdminInitiateAuth` 로 발급합니다. **서버(Gateway)별 사용 승인 = Cognito 그룹 `mcp:<gateway-id>`**: MCP 사용 신청이 승인되면 그룹에 추가, 취소하면 제거 + 리프레시 토큰 폐기. 포털 화면의 «접속 토큰» UI 는 없앴습니다(Claude Code 는 «MCP - OAuth 인증» 의 브라우저 로그인을 씁니다). API `GET /api/mcp/{id}/token` 은 남아 있습니다(승인 전 403, 누를 때마다 발급하고 서버에 저장하지 않음). 액세스 토큰은 Cognito 최대인 **24시간**, 리프레시 토큰은 최대 **약 10년**(3650일)이라 만료 없는 JWT 는 없고, 클라이언트가 리프레시 토큰으로 새 액세스 토큰을 받습니다. 수동으로는 `./add_user.sh <email> [--token]`: 사용자를 만들고 **인터셉터가 보는 그룹 `mcp:<gateway-id>`**(기본 `us-east-1` Gateway, `--gateway`로 변경)에 바로 넣습니다(관리자용이라 포털의 신청·승인 절차를 거치지 않음; `--no-group` 이면 그룹 없이 생성, 승인 취소는 `--revoke us-east-1`). 그룹은 인터셉터 기준 하나뿐이고 임의 이름의 소속 그룹은 쓰지 않습니다. **JWT Gateway 테스트**: MCP 테스트를 시작하면 포털이 로그인한 사용자의 액세스 토큰을 그때그때 발급해(사용 승인된 사람만; 저장·로그 안 함) harness 가 `Authorization: Bearer` 헤더를 붙인 remote MCP 로 Gateway 를 호출합니다. **인터셉터의 서버별 승인 검사**: JWT gateway 는 인터셉터에 `passRequestHeaders=true` 로 헤더를 넘기고(IAM gateway 는 서명을 넘기지 않으려고 `false`), 인터셉터가 `Authorization` 의 토큰 페이로드(서명은 Gateway 가 이미 검증)에서 사용자(`sub`)를 알아내고, Cognito `AdminGetUser` 로 이메일을 찾은 뒤, **요청마다 포털 DynamoDB 의 사용 신청 기록(`USAGE#<MCP id>` / 이메일)을 직접 읽어** 요청이 들어온 gateway 의 MCP 에 대해 **소유자이거나 신청 상태가 `APPROVED`** 일 때만 통과시킵니다(`tools/list`·`tools/call` 등). **Cognito 그룹은 보지 않습니다** — 그룹은 포털 승인 기록의 사본일 뿐이라 둘이 어긋나면(예: 기록은 지웠는데 그룹이 남음) 취소가 반영되지 않기 때문입니다. 그래서 사용 승인을 취소하면 이미 발급된 액세스 토큰도 바로 거절됩니다. 없으면 target 으로 보내지 않고 JSON-RPC 오류("이 MCP 서버의 사용이 승인되지 않았습니다")를 돌려줍니다 — 이메일·MCP·기록 중 하나라도 확인하지 못하면 거절(fail-closed). 환경 변수 `DDB_TABLE`·`DDB_REGION`·`COGNITO_USER_POOL_ID`·`COGNITO_REGION` 은 installer 가 설정하고, 역할에는 풀의 `AdminGetUser` 와 테이블의 `GetItem`·`Query` 만 줍니다(MCP 항목 목록은 60초 캐시). 연결 협상(`initialize`·`ping`·알림)은 통과시키고, IAM 호출자는 대상이 아니며, 응답은 막지 않습니다. 환경 변수 `ENFORCE_GROUPS=0` 이면 로그만 남기는 롤백 모드입니다. 로그에는 호출자(`cognito:<sub>`)·gateway·차단 사유만 남고 토큰·헤더는 남기지 않습니다. 한계: 승인을 취소해도 이미 발급된 액세스 토큰은 만료까지 남지만, 인터셉터가 그룹을 매 요청 토큰에서 읽으므로 **취소 후 새로 받은 토큰(그룹 없음)부터 차단**됩니다 — 취소 직전에 받은 액세스 토큰은 그룹이 들어 있어 만료(최대 24시간)까지 통과할 수 있습니다.
+  **interceptor**(`interceptorConfigurations`)는 Lambda `lambda-ai-portal-intercepter`(`lambda-interceptor/`, 철자는 요청대로)를 **각 gateway 와 같은 리전에** 두고 `REQUEST`·`RESPONSE` 양쪽에 연결하며 `passRequestHeaders=false` 라 SigV4 서명 헤더는 넘기지 않습니다. Lambda 는 **IAM Gateway(`gw-ai-portal-iam`, `gw-websearch-iam`)의 요청은 그대로 통과**시키고(JWT Gateway 의 승인 검사는 아래 «MCP 접속 토큰» 참고) 모든 요청에 대해 CloudWatch Logs 에 **호출자(IAM principal ARN, 이벤트의 `context.identity.awsPrincipalArn`)**·메서드·tool 이름·인자 **이름**·응답 상태만 남깁니다(인자 값·응답 본문·서명은 남기지 않음). 포털의 MCP 테스트처럼 harness 가 호출하면 호출자는 harness 실행 역할로 보이며 포털 사용자 이메일은 나오지 않습니다. accept/block 판단은 `decide()` 에 모여 있고, block 은 target 으로 보내지 않고 JSON-RPC 오류를 바로 돌려줍니다. 역할은 리전별로 `role-gateway-for-ai-portal-<region>`(인터셉터 호출 + us-east-1 은 web search), `role-lambda-interceptor-for-ai-portal-<region>`(로그 쓰기만). 포털 리전 gateway 의 ID/URL 만 `config.json`(`gateway_id`·`gateway_url`)에 두고, websearch gateway 는 이름으로 AWS 에서 찾아 재사용합니다. 이미 있으면 재사용하므로 여러 번 실행해도 됩니다. **인증 방식은 만든 뒤 바꾸지 않습니다**(바꾸려면 gateway 와 target 을 지우고 다시 실행; installer 가 불일치를 감지하면 중단). IAM 과 JWT 는 함께 쓸 수 없어서, JWT gateway 는 `mcp-proxy-for-aws`(SigV4) 같은 IAM 프록시로 접속할 수 없고 `Authorization: Bearer <Google ID 토큰>` 이 필요합니다. **주의**: gateway 이름은 `UpdateGateway` 로 바꿀 수 없어서(`Name cannot be updated`), 예전 이름(`gw-ai-portal`, `gw-ai-portal-websearch`)으로 만든 것은 새 이름으로 새로 만들었고 옛 것은 직접 지워야 합니다.
+- **MCP 접속 토큰 (Gateway 인증 = Cognito JWT)**: `gw-websearch-jwt` 은 Cognito 사용자 풀 `ai-portal-users`(us-east-1)가 발급한 JWT 만 받습니다. 브라우저 로그인(OAuth)은 Cognito 가 **Google 을 Identity Provider 로 federation** 해서 처리하고(아래 «MCP - OAuth 인증» 참고), 포털 화면에서 받는 접속 토큰은 포털의 Google 로그인으로 신원을 확인한 뒤 포털이 로그인한 사용자를 Cognito 에 만들며(`AdminCreateUser`, 비밀번호는 아무도 모르는 무작위 값; 셀프 가입 금지) 토큰도 서버가 `AdminInitiateAuth` 로 발급합니다. **서버(Gateway)별 사용 승인 = Cognito 그룹 `mcp:<gateway-id>`**: MCP 사용 신청이 승인되면 그룹에 추가, 취소하면 제거 + 리프레시 토큰 폐기. 포털 화면의 «접속 토큰» UI 는 없앴습니다(Claude Code 는 «MCP - OAuth 인증» 의 브라우저 로그인을 씁니다). API `GET /api/mcp/{id}/token` 은 남아 있습니다(승인 전 403, 누를 때마다 발급하고 서버에 저장하지 않음). 액세스 토큰은 Cognito 최대인 **24시간**, 리프레시 토큰은 최대 **약 10년**(3650일)이라 만료 없는 JWT 는 없고, 클라이언트가 리프레시 토큰으로 새 액세스 토큰을 받습니다. 수동으로는 `./add_user.sh <email> [--token]`: 사용자를 만들고 **인터셉터가 보는 그룹 `mcp:<gateway-id>`**(기본 `us-east-1` Gateway, `--gateway`로 변경)에 바로 넣습니다(관리자용이라 포털의 신청·승인 절차를 거치지 않음; `--no-group` 이면 그룹 없이 생성, 승인 취소는 `--revoke us-east-1`). 그룹은 인터셉터 기준 하나뿐이고 임의 이름의 소속 그룹은 쓰지 않습니다. **JWT Gateway 테스트**: MCP 테스트를 시작하면 포털이 로그인한 사용자의 액세스 토큰을 그때그때 발급해(사용 승인된 사람만; 저장·로그 안 함) harness 가 `Authorization: Bearer` 헤더를 붙인 remote MCP 로 Gateway 를 호출합니다. **인터셉터의 서버별 승인 검사**: JWT gateway 는 인터셉터에 `passRequestHeaders=true` 로 헤더를 넘기고(IAM gateway 는 서명을 넘기지 않으려고 `false`), 인터셉터가 `Authorization` 의 토큰 페이로드(서명은 Gateway 가 이미 검증)에서 사용자(`sub`)를 알아내고, Cognito `AdminGetUser` 로 이메일을 찾은 뒤, **요청마다 포털 DynamoDB 의 사용 신청 기록(`USAGE#<MCP id>` / 이메일)을 직접 읽어** 요청이 들어온 gateway 의 MCP 에 대해 **소유자이거나 신청 상태가 `APPROVED`** 일 때만 통과시킵니다(`tools/list`·`tools/call` 등). **Cognito 그룹은 보지 않습니다** — 그룹은 포털 승인 기록의 사본일 뿐이라 둘이 어긋나면(예: 기록은 지웠는데 그룹이 남음) 취소가 반영되지 않기 때문입니다. 그래서 사용 승인을 취소하면 이미 발급된 액세스 토큰도 바로 거절됩니다. 없으면 target 으로 보내지 않고 JSON-RPC 오류("이 MCP 서버의 사용이 승인되지 않았습니다")를 돌려줍니다 — 이메일·MCP·기록 중 하나라도 확인하지 못하면 거절(fail-closed). 환경 변수 `DDB_TABLE`·`DDB_REGION`·`COGNITO_USER_POOL_ID`·`COGNITO_REGION` 은 installer 가 설정하고, 역할에는 풀의 `AdminGetUser` 와 테이블의 `GetItem`·`Query` 만 줍니다(MCP 항목 목록은 60초 캐시). 연결 협상(`initialize`·`ping`·알림)은 통과시키고, IAM 호출자는 대상이 아니며, 응답은 막지 않습니다. 환경 변수 `ENFORCE_GROUPS=0` 이면 로그만 남기는 롤백 모드입니다. 로그에는 호출자(`cognito:<sub>`)·gateway·차단 사유만 남고 토큰·헤더는 남기지 않습니다. 한계: 승인을 취소해도 이미 발급된 액세스 토큰은 만료까지 남지만, 인터셉터가 그룹을 매 요청 토큰에서 읽으므로 **취소 후 새로 받은 토큰(그룹 없음)부터 차단**됩니다 — 취소 직전에 받은 액세스 토큰은 그룹이 들어 있어 만료(최대 24시간)까지 통과할 수 있습니다.
 - **Registry `ai-portal`**: IAM 인증, auto-approval 꺼짐. ID 는 `application/config.json`(`registry_id`)에 기록 (us-west-2, 값은 `config.json` 의 `registry_id` 참조).
 - **승인 요청 메일**: EventBridge 규칙 `ai-portal-approval-requested`(`Registry Record State changed to Pending Approval`, 이 Registry 만) → Lambda `ai-portal-approval-notify`(`lambda-notify/`) → **SES**. 수신자는 **모든 관리자**입니다(등록 승인은 관리자 전용이라 reviewer 에게는 보내지 않습니다). 메일에 승인 링크(`{PORTAL_ORIGIN}/approvals/<recordId>`)가 들어갑니다. 발신 주소는 `ai-portal@my-agentic-ai.click` 하나로 IAM 조건 키로 고정되고, 도메인은 DKIM 인증을 마쳤습니다. **SES 샌드박스 제약**: 이 계정의 SES 는 프로덕션 액세스가 꺼져 있어, *인증된 수신 주소로만* 발송됩니다(하루 200통). 승인자를 추가할 때마다 그 주소를 SES 에 등록·인증하거나 SES 프로덕션 액세스를 신청해야 합니다. 링크 주소를 바꾸려면 `PORTAL_ORIGIN` 설정 후 `--notifications-only` 를 다시 실행합니다.
 - **전체 설치(실행됨, 2026-11-04)**: 새 VPC `10.23.0.0/16`, ALB(보안 그룹이 CloudFront origin-facing prefix list 의 80 만 허용 → 인터넷에서 ALB 직접 접속 불가, 안쪽은 `X-Origin-Verify` 비밀 헤더), ECR(arm64), ECS Fargate desired=1, CloudFront(HTTPS 강제·보안 헤더), Secrets Manager(`ai-portal/session-signing-key`, `llm-gateway-key`). **배포 URL: https://portal.my-agentic-ai.click** (`config.json` 의 `sharing_url`; CloudFront 기본 주소(`config.json` 의 `cloudfront_domain`)도 계속 동작). 사용하는 주소를 Google OAuth client 의 **Authorized JavaScript origins** 에 추가해야 로그인됩니다. 이미지에는 `config.json` 이 들어가지 않으므로 Registry ID·harness ARN 은 ECS 환경 변수(`REGISTRY_ID`, `HARNESS_ARN`)로 전달합니다. 보안 그룹 이름은 `sg-` 로 시작할 수 없습니다(AWS 제약). 재배포: 코드 변경 후 `python installer.py`(이미지를 다시 빌드·푸시하고 ECS 를 강제 재배포), 이미지 재빌드 없이 인프라만은 `--skip-docker-build`.
@@ -330,7 +345,7 @@ python installer.py --skip-docker-build    # 이미지 재빌드 없이
 
 ## MCP - OAuth 인증
 
-`gw-ai-portal-websearch-jwt` Gateway 는 Cognito(`ai-portal-users`)가 발급한 JWT 만 받습니다. Claude Code 는 **브라우저 로그인(OAuth authorization code)** 으로 이 토큰을 직접 받아 쓸 수 있어서, 포털에서 토큰을 복사해 붙이지 않아도 됩니다.
+`gw-websearch-jwt` Gateway 는 Cognito(`ai-portal-users`)가 발급한 JWT 만 받습니다. Claude Code 는 **브라우저 로그인(OAuth authorization code)** 으로 이 토큰을 직접 받아 쓸 수 있어서, 포털에서 토큰을 복사해 붙이지 않아도 됩니다.
 
 ### 흐름
 
@@ -364,7 +379,7 @@ claude mcp add my-gateway https://<gateway-url>/mcp \
 이 프로젝트의 값으로 쓰면 다음과 같습니다(MCP URL 은 포털·콘솔, `cognito_client_id` 는 `config.json`).
 
 ```bash
-claude mcp add gw-ai-portal-websearch-jwt \
+claude mcp add gw-websearch-jwt \
   https://<gateway-id>.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp \
   --transport http \
   --client-id <cognito_client_id> \

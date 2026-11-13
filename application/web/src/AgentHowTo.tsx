@@ -239,6 +239,7 @@ export default function AgentHowTo({ item }: { item: Item }) {
       <div className="actions left" role="group" aria-label="사용 방법 선택">
         <button type="button" className={`btn ${show ? "" : "ghost"}`} aria-pressed={show}
                 onClick={() => { setShow(!show); setCopied(false); }}>Python (boto3)</button>
+        <a className="btn ghost" href={`/playground/${item.id}`} target="_blank" rel="noopener noreferrer">Playground</a>
       </div>
       {show && (<>
         <pre className="code">{ex.code}</pre>

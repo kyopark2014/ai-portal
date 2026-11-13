@@ -181,6 +181,36 @@ def runtime_info(runtime_id: str) -> dict:
         return {"protocol": "", "auth": ""}
 
 
+def ensure_runtime_gateway_target(gateway_id: str, name: str, endpoint: str, timeout: int = 120) -> None:
+    """IAM 인증 runtime MCP 를 IAM Gateway 의 target 으로 붙인다(이미 있으면 그대로). READY 가 될 때까지 기다린다.
+
+    target 이름은 gateway 안에서 유일해야 하고 영문·숫자·하이픈만 쓸 수 있어 record 이름(slug)을 하이픈으로 바꿔 쓴다.
+    runtime target 은 GATEWAY_IAM_ROLE + iamCredentialProvider(bedrock-agentcore) 가 필수다(installer_hr.py 와 같다).
+    """
+    import time
+    c = client("bedrock-agentcore-control")
+    tname = re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-")[:100] or "mcp"
+    found = None
+    for t in c.list_gateway_targets(gatewayIdentifier=gateway_id).get("items", []):
+        if t.get("name") == tname:
+            found = t
+            break
+    if found is None:
+        found = c.create_gateway_target(
+            gatewayIdentifier=gateway_id, name=tname, description=f"portal runtime MCP: {name}"[:200],
+            targetConfiguration={"mcp": {"mcpServer": {"endpoint": endpoint}}},
+            credentialProviderConfigurations=[{"credentialProviderType": "GATEWAY_IAM_ROLE", "credentialProvider": {
+                "iamCredentialProvider": {"service": "bedrock-agentcore", "region": region()}}}])
+    deadline = time.time() + timeout
+    while True:
+        st = c.get_gateway_target(gatewayIdentifier=gateway_id, targetId=found["targetId"]).get("status", "")
+        if st == "READY":
+            return
+        if st.endswith("FAILED") or time.time() > deadline:
+            raise RuntimeError(f"Gateway target {tname}: {st or 'timeout'}")
+        time.sleep(3)
+
+
 def runtime_mcp_url(arn: str) -> str:
     """MCP 프로토콜 runtime 의 호출 URL (AgentCore Runtime MCP 규약)."""
     from urllib.parse import quote

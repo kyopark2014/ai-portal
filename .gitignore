@@ -3,6 +3,9 @@
 .env
 application/web/node_modules/
 application/web/dist/
+playground/node_modules/
+playground/dist/
+application/playground_web/
 application/data/
 **/__pycache__/
 *.pyc

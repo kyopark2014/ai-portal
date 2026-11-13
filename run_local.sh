@@ -9,6 +9,10 @@ cd "$ROOT"
 echo "==> Frontend build"
 (cd application/web && npm install && npm run build)
 
+echo "==> Playground build (/playground)"
+(cd playground && npm install && npm run build)
+rm -rf application/playground_web/dist && mkdir -p application/playground_web && cp -R playground/dist application/playground_web/dist
+
 PIDS="$(lsof -tiTCP:"${PORT}" -sTCP:LISTEN 2>/dev/null || true)"
 [ -n "$PIDS" ] && { echo "==> Port ${PORT} in use — killing $PIDS"; kill $PIDS 2>/dev/null || true; sleep 1; }
 

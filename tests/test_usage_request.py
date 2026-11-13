@@ -225,20 +225,20 @@ def agent(status="APPROVED", rec="agrec12345", owner=OWNER):
     db.update_item(i, registry_id="REG", registry_record_id=rec, registry_status=status); return i
 
 
-def test_agent_usage_request_flow_and_chat_gate(env, monkeypatch):
+def test_agent_usage_request_flow_and_iam_chat_gate(env, monkeypatch):
     from application import agent_test
     i = agent()
     body = {"session_id": "s" * 36, "messages": [{"role": "user", "content": "hi"}]}
     assert client(USER).get(f"/api/agent/{i}/usage").json()["can_request"] is True
-    assert client(USER).post(f"/api/agents/{i}/chat", json=body).status_code == 403              # 승인 전에는 대화 불가
+    monkeypatch.setattr(agent_test, "_harness_events", lambda *a, **k: iter([{"t": "ok"}]))
+    assert client(USER).post(f"/api/agents/{i}/chat", json=body).status_code == 200             # IAM(기본) agent 는 사용 승인 전에도 테스트 가능
     assert client(USER).post(f"/api/agent/{i}/usage").json()["status"] == "PENDING"
     assert client(USER).post(f"/api/mcp/{i}/usage").status_code == 404                           # 종류가 다르면 찾지 못한다
     req = client(ADMIN).get("/api/usage-requests").json()["requests"][0]
     assert req["email"] == USER and req["mcp"]["kind"] == "agent"
     assert client(ADMIN).post(f"/api/usage-requests/{i}/{USER}/decision", json={"decision": "APPROVED"}).status_code == 200
-    monkeypatch.setattr(agent_test, "_harness_events", lambda *a, **k: iter([{"t": "ok"}]))
     assert client(USER).post(f"/api/agents/{i}/chat", json=body).status_code == 200
-    assert client(OWNER).post(f"/api/agents/{i}/chat", json=body).status_code == 403            # 소유자도 신청·승인 전에는 대화 불가
+    assert client(OWNER).post(f"/api/agents/{i}/chat", json=body).status_code == 200            # IAM agent 는 소유자도 승인 전에 테스트할 수 있다
     client(OWNER).post(f"/api/agent/{i}/usage")
     client(ADMIN).post(f"/api/usage-requests/{i}/{OWNER}/decision", json={"decision": "APPROVED"})
     assert client(OWNER).post(f"/api/agents/{i}/chat", json=body).status_code == 200

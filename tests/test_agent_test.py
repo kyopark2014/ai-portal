@@ -76,12 +76,48 @@ def test_runtime_streams_text_and_tools_with_agentic_work_payload(env, monkeypat
     evs = events(client().post(f"/api/agents/{iid}/chat", json={**BODY, "messages": [
         {"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}, {"role": "user", "content": "c"}]}))
     assert "".join(e.get("t", "") for e in evs) == "hello"              # 최종 result 와 중복되지 않는다
-    assert {"tool_call": "get_current_time", "input": ""} in evs and {"tool_result": "12:00"} in evs
+    assert {"tool_call": "get_current_time", "input": ""} in evs
+    assert any(e.get("tool_result") == "12:00" and e.get("tool") == "get_current_time" for e in evs)
     p = json.loads(seen["payload"])
     assert p["prompt"].endswith("c") and "[이전 대화]" in p["prompt"] and "사용자: a" in p["prompt"]
     assert p["guardrail_enabled"] is False and p["memory_enabled"] is False
     assert "model_name" not in p                                        # agent 별 기본 모델을 쓴다
     assert "@" not in p["user_id"] and "@" not in seen["runtimeUserId"] and seen["qualifier"] == "DEFAULT"
+
+
+def test_runtime_passes_through_agent_mcp_app(env, monkeypatch):
+    """runtime 이 보낸 완전한 mcpApp 은 truncate 된 toolResult 로 다시 만들지 않고 그대로 전달한다."""
+    full = '{"region":{"stn_id":"109","name":"서울"},"pad":"' + ("y" * 9000) + '"}'
+    mcp_app = {
+        "resourceUri": "ui://kma-short-term/weather.html",
+        "html": "<html>weather</html>",
+        "mcpServer": "korea-weather",
+        "tool": "get_weather",
+        "toolResult": {"content": [{"type": "text", "text": full}]},
+    }
+
+    class Body:
+        def iter_lines(self):
+            payload = {
+                "toolResult": full[:8000],
+                "tool": "get_weather",
+                "toolUseId": "t1",
+                "mcpApp": mcp_app,
+            }
+            yield ("data: " + json.dumps(payload, ensure_ascii=False)).encode()
+            yield b'data: {"data": "ok"}'
+
+    class RTc:
+        def invoke_agent_runtime(self, **kw):
+            return {"contentType": "text/event-stream; charset=utf-8", "response": Body()}
+
+    monkeypatch.setattr(aws.boto3, "client", lambda *a, **k: RTc())
+    iid = agent({"arn": RT, "agent_type": "runtime", "protocol": "HTTP"})
+    evs = events(client().post(f"/api/agents/{iid}/chat", json=BODY))
+    res = next(e for e in evs if e.get("mcpApp"))
+    assert res["mcpApp"]["html"] == "<html>weather</html>"
+    assert res["mcpApp"]["toolResult"]["content"][0]["text"] == full
+    assert len(res["tool_result"]) == 4000  # 표시용 truncate
 
 
 def test_runtime_result_only_and_non_sse(env, monkeypatch):
@@ -187,3 +223,14 @@ def test_harness_still_creating_gives_a_clear_409(env, monkeypatch):
     iid = agent({"arn": HN, "agent_type": "harness"})
     r = client().post(f"/api/agents/{iid}/chat", json=BODY)
     assert r.status_code == 409 and "준비되지 않았습니다" in r.json()["detail"]
+
+
+def test_iam_agent_chat_needs_no_usage_approval_but_jwt_does(env, monkeypatch):
+    class RTc:
+        def invoke_agent_runtime(self, **kw): raise RuntimeError("boom")
+    monkeypatch.setattr(aws.boto3, "client", lambda *a, **k: RTc())
+    iam = agent({"arn": RT, "agent_type": "runtime", "auth": "IAM"}, grant=False)       # 등록·사용 승인 전
+    assert client("a@x.com").post(f"/api/agents/{iam}/chat", json=BODY).status_code == 200
+    assert client("b@x.com").post(f"/api/agents/{iam}/chat", json=BODY).status_code == 404   # 남의 미등록 항목은 여전히 안 보인다
+    jwt = agent({"arn": HN, "agent_type": "harness", "auth": "JWT"}, grant=False)
+    assert client("a@x.com").post(f"/api/agents/{jwt}/chat", json=BODY).status_code == 403   # JWT 는 승인 뒤에만

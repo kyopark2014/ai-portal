@@ -2,6 +2,7 @@ fastapi>=0.134.0
 uvicorn[standard]
 google-auth>=2.30.0
 requests
+beautifulsoup4
 pytest
 httpx
 boto3>=1.43.123

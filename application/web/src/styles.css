@@ -150,6 +150,10 @@ body{margin:0;min-height:100vh;color:var(--ink);font-family:var(--body);
 .step{border:1px solid var(--line);border-radius:8px;background:var(--paper);font-size:.82rem}
 .step summary{cursor:pointer;padding:.3rem .6rem;color:var(--soft);font-weight:600}
 .step.call summary{color:var(--teal)}.step .code{margin:0;border-radius:0 0 8px 8px;max-height:200px}
+.tool-card-stack{display:grid;gap:.5rem;width:100%;min-width:0}
+.mcp-app-frame{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#0b1f33;width:100%}
+.mcp-app-status{padding:6px 12px;font-size:12px;color:var(--soft);background:rgba(255,255,255,.04)}
+.mcp-app-iframe{display:block;width:100%;border:0;background:transparent;min-height:280px}
 
 /* 긴 식별자(ARN·URL)는 격자 한 칸이 아니라 한 줄 전체를 쓰고, 한 줄에 못 들어가면 글자 단위가 아니라 구분자(: / -)에서 줄바꿈 */
 .kv .wide-row{grid-column:1 / -1}

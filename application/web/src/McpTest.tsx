@@ -1,18 +1,26 @@
 import { useEffect, useRef, useState } from "react";
 import * as api from "./api";
-import type { Item, McpEvent } from "./api";
+import type { Item, McpAppPayload, McpEvent } from "./api";
 import Markdown from "./Markdown";
+import { McpAppFrame } from "./McpAppFrame";
 
 // 한 턴을 "텍스트 / 도구 호출 / 도구 결과" 의 시간순 목록으로 둔다. 도구와 텍스트를 따로 모으면
 // 중간 답변이 전부 맨 아래로 밀려 도구 호출과의 선후 관계가 사라진다(harness-work 의 tool_events 와 같은 방식).
-type Part = { kind: "text"; text: string } | { kind: "call"; name?: string; text: string } | { kind: "result"; text: string };
+type Part =
+  | { kind: "text"; text: string }
+  | { kind: "call"; name?: string; text: string }
+  | { kind: "result"; text: string; mcpApp?: McpAppPayload };
 interface Turn { role: "user" | "assistant"; content: string; parts?: Part[]; meta?: string }
 
 /** 스트림 조각을 시간순 목록 끝에 반영한다. 같은 종류가 연달아 오면 이어 붙이고, 종류가 바뀌면 새 항목을 만든다. */
 function pushPart(parts: Part[], next: Part): Part[] {
   const tail = parts[parts.length - 1];
   if (tail && tail.kind === next.kind && next.kind !== "call") {      // 텍스트·결과는 조각으로 오므로 이어 붙인다
-    return [...parts.slice(0, -1), { ...tail, text: tail.text + next.text } as Part];
+    const merged = { ...tail, text: tail.text + next.text } as Part;
+    if (merged.kind === "result" && next.kind === "result" && next.mcpApp) {
+      merged.mcpApp = next.mcpApp;                                   // 누적 결과가 반영된 최신 mcpApp 유지
+    }
+    return [...parts.slice(0, -1), merged];
   }
   return [...parts, next];
 }
@@ -59,7 +67,12 @@ export default function McpTest({ item }: { item: Item }) {
       if (e.status) setStatus(e.status);
       if (e.t) { setStatus(""); last((t) => ({ ...t, content: t.content + e.t, parts: pushPart(t.parts ?? [], { kind: "text", text: e.t! }) })); }
       if (e.tool_call) last((t) => ({ ...t, parts: pushPart(t.parts ?? [], { kind: "call", name: e.tool_call, text: e.input ?? "" }) }));
-      if (e.tool_result !== undefined) last((t) => ({ ...t, parts: pushPart(t.parts ?? [], { kind: "result", text: e.tool_result! }) }));
+      if (e.tool_result !== undefined) {
+        last((t) => ({
+          ...t,
+          parts: pushPart(t.parts ?? [], { kind: "result", text: e.tool_result!, mcpApp: e.mcpApp }),
+        }));
+      }
       if (e.error) setErr(e.error);
       if (e.done) last((t) => ({ ...t, meta: e.usage ? `in ${e.usage.input_tokens ?? "?"} / out ${e.usage.output_tokens ?? "?"}` : "" }));
     };
@@ -81,12 +94,26 @@ export default function McpTest({ item }: { item: Item }) {
           <div key={i} className={`bubble ${t.role}`} aria-label={t.role === "user" ? "내 메시지" : "agent 응답"}>
             {t.role === "assistant" ? (
               <>
-                {(t.parts ?? []).map((p, j) => p.kind === "text"
-                  ? <Markdown key={j}>{p.text}</Markdown>
-                  : (<details key={j} className={`step ${p.kind}`}>
+                {(t.parts ?? []).map((p, j) => {
+                  if (p.kind === "text") return <Markdown key={j}>{p.text}</Markdown>;
+                  if (p.kind === "result" && p.mcpApp?.html) {
+                    return (
+                      <div key={j} className="tool-card-stack">
+                        <McpAppFrame app={p.mcpApp} />
+                        <details className={`step ${p.kind}`}>
+                          <summary>도구 결과</summary>
+                          <pre className="code">{p.text}</pre>
+                        </details>
+                      </div>
+                    );
+                  }
+                  return (
+                    <details key={j} className={`step ${p.kind}`}>
                       <summary>{p.kind === "call" ? `도구 호출 · ${p.name}` : "도구 결과"}</summary>
                       <pre className="code">{p.text}</pre>
-                    </details>))}
+                    </details>
+                  );
+                })}
                 {!(t.parts?.length) && <div className="txt">{busy && i === turns.length - 1 ? "…" : ""}</div>}
               </>
             ) : <div className="txt">{t.content}</div>}

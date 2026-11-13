@@ -17,7 +17,7 @@
   python installer.py --registry-only       # Registry 만 생성
   python installer.py --notifications-only  # 승인 요청 메일 알림(SNS + EventBridge)만 구성
   python installer.py --harness-only        # MCP 테스트용 harness agent `ai_portal` 만 생성
-  python installer.py --gateway-only        # AgentCore Gateway `gw-ai-portal-jwt`·`gw-ai-portal-iam`·`gw-ai-portal-websearch-jwt`·`gw-ai-portal-websearch-iam` (+ target, interceptor Lambda) 만 생성
+  python installer.py --gateway-only        # AgentCore Gateway `gw-ai-portal-jwt`·`gw-ai-portal-iam`·`gw-websearch-jwt`·`gw-websearch-iam` (+ target, interceptor Lambda) 만 생성
   python installer.py --hr-only             # Aurora + HR Advisor MCP Runtime(+ gw-ai-portal-jwt/iam target)만 구성
   python installer.py                       # 전체 설치
   python installer.py --skip-docker-build   # 인프라만 갱신(ECR 최신 이미지 재사용)
@@ -361,11 +361,11 @@ INTERCEPTOR_FUNCTION = f"lambda-{project_name}-intercepter"   # lambda-ai-portal
 def interceptor_role_name(rgn: str) -> str: return f"role-lambda-interceptor-for-{project_name}-{rgn}"
 def gateway_role_name(rgn: str) -> str: return f"role-gateway-for-{project_name}-{rgn}"
 # web-search gateway 두 개(us-east-1, target 은 AWS 관리형 web-search connector, 둘 다 interceptor 사용). 인증 방식만 다르다.
-#   gw-ai-portal-websearch-jwt : Cognito JWT 인증 (Claude Code 등 사용자 토큰으로 호출)
-#   gw-ai-portal-websearch-iam : IAM(SigV4) 인증 (에이전트에 붙일 수 있는 gateway)
+#   gw-websearch-jwt : Cognito JWT 인증 (Claude Code 등 사용자 토큰으로 호출)
+#   gw-websearch-iam : IAM(SigV4) 인증 (에이전트에 붙일 수 있는 gateway)
 WEBSEARCH_REGION = "us-east-1"
-WEBSEARCH_JWT_GATEWAY_NAME = f"gw-{project_name}-websearch-jwt"
-WEBSEARCH_IAM_GATEWAY_NAME = f"gw-{project_name}-websearch-iam"
+WEBSEARCH_JWT_GATEWAY_NAME = "gw-websearch-jwt"
+WEBSEARCH_IAM_GATEWAY_NAME = "gw-websearch-iam"
 WEBSEARCH_TARGET_NAME = f"target-{project_name}-websearch"
 # 주의: gateway 이름은 UpdateGateway 로 바꿀 수 없다("Name cannot be updated"). 예전 이름(gw-ai-portal-websearch,
 # gw-ai-portal-us-west-2, gw-ai-portal-us-east-1)의 gateway 는 그대로 남으므로 필요 없으면 직접 지운다. 설치기는 새 이름으로 새로 만든다.
@@ -630,7 +630,7 @@ def ensure_gateway(rgn: str = region, websearch: bool = False, cognito_jwt: bool
 
 def ensure_gateways(recreate: bool = False) -> None:
     """gw-ai-portal-jwt (Cognito JWT) · gw-ai-portal-iam (IAM): 둘 다 MCP server target(knowledge-mcp),
-    gw-ai-portal-websearch-jwt (Cognito JWT) · gw-ai-portal-websearch-iam (IAM): 둘 다 web-search target."""
+    gw-websearch-jwt (Cognito JWT) · gw-websearch-iam (IAM): 둘 다 web-search target."""
     ensure_gateway(region, cognito_jwt=True, name=PORTAL_JWT_GATEWAY_NAME, recreate=recreate, config_prefix="gateway")
     ensure_gateway(region, cognito_jwt=False, name=PORTAL_IAM_GATEWAY_NAME, recreate=recreate, config_prefix="gateway_iam")
     ensure_gateway(WEBSEARCH_REGION, websearch=True, cognito_jwt=True, name=WEBSEARCH_JWT_GATEWAY_NAME, recreate=recreate)
@@ -805,32 +805,39 @@ def ensure_cognito() -> Dict[str, str]:
 
 # ── 1e. 영구 저장소 (DynamoDB) ──────────────────────────────────────────
 DDB_TABLE = project_name                    # 테이블 이름 = 프로젝트 이름
+PLAYGROUND_DDB_TABLE = f"{project_name}-playground"      # Playground(/playground) 대화 저장소. 포털 본 테이블과 분리한다
+
+
+def _create_table(ddb: Any, name: str) -> str:
+    """온디맨드 테이블(pk/sk) 하나를 만들고 삭제 보호·PITR 을 켠다. 이미 있으면 그대로 두고 ARN 을 돌려준다."""
+    try:
+        desc = ddb.describe_table(TableName=name)["Table"]
+        logger.warning("DynamoDB table exists: %s (%s)", name, desc["TableStatus"])
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ResourceNotFoundException":
+            raise
+        ddb.create_table(TableName=name, BillingMode="PAY_PER_REQUEST", DeletionProtectionEnabled=True,
+                         KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}, {"AttributeName": "sk", "KeyType": "RANGE"}],
+                         AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}, {"AttributeName": "sk", "AttributeType": "S"}],
+                         Tags=TAGS)
+        logger.info("Created DynamoDB table %s", name)
+    ddb.get_waiter("table_exists").wait(TableName=name)
+    try:
+        ddb.update_continuous_backups(TableName=name, PointInTimeRecoverySpecification={"PointInTimeRecoveryEnabled": True})
+    except ClientError as e:
+        logger.warning("PITR not enabled: %s", e.response["Error"]["Code"])
+    return ddb.describe_table(TableName=name)["Table"]["TableArn"]
 
 
 def ensure_table() -> str:
-    """포털 데이터(등록 항목·등록자·로그인 기록·설정) 저장소. 컨테이너 DB 와 달리 재배포해도 유지된다.
+    """포털 데이터(등록 항목·등록자·로그인 기록·설정) 저장소 + Playground 대화 저장소. 컨테이너 DB 와 달리 재배포해도 유지된다.
 
     온디맨드(요청당 과금)라 이 규모에서는 월 비용이 거의 없고, 삭제 보호와 PITR(35일 복구)을 켠다.
     """
     ddb = session.client("dynamodb")
-    try:
-        desc = ddb.describe_table(TableName=DDB_TABLE)["Table"]
-        logger.warning("DynamoDB table exists: %s (%s)", DDB_TABLE, desc["TableStatus"])
-    except ClientError as e:
-        if e.response["Error"]["Code"] != "ResourceNotFoundException":
-            raise
-        ddb.create_table(TableName=DDB_TABLE, BillingMode="PAY_PER_REQUEST", DeletionProtectionEnabled=True,
-                         KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}, {"AttributeName": "sk", "KeyType": "RANGE"}],
-                         AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}, {"AttributeName": "sk", "AttributeType": "S"}],
-                         Tags=TAGS)
-        logger.info("Created DynamoDB table %s", DDB_TABLE)
-    ddb.get_waiter("table_exists").wait(TableName=DDB_TABLE)
-    try:
-        ddb.update_continuous_backups(TableName=DDB_TABLE, PointInTimeRecoverySpecification={"PointInTimeRecoveryEnabled": True})
-    except ClientError as e:
-        logger.warning("PITR not enabled: %s", e.response["Error"]["Code"])
-    arn = ddb.describe_table(TableName=DDB_TABLE)["Table"]["TableArn"]
-    save_config(ddb_table=DDB_TABLE, ddb_table_arn=arn)
+    arn = _create_table(ddb, DDB_TABLE)
+    pg_arn = _create_table(ddb, PLAYGROUND_DDB_TABLE)
+    save_config(ddb_table=DDB_TABLE, ddb_table_arn=arn, playground_ddb_table=PLAYGROUND_DDB_TABLE, playground_ddb_table_arn=pg_arn)
     return arn
 
 
@@ -910,7 +917,10 @@ def create_ecs_roles(secret_arns: List[str]) -> Dict[str, str]:
                 "bedrock-agentcore:ListHarnesses", "bedrock-agentcore:GetHarness",
                 "bedrock-agentcore:ListAgentRuntimes", "bedrock-agentcore:GetAgentRuntime",
                 # MCP 탭: AgentCore Gateway 동기화
-                "bedrock-agentcore:ListGateways", "bedrock-agentcore:GetGateway"]},
+                "bedrock-agentcore:ListGateways", "bedrock-agentcore:GetGateway",
+                # IAM runtime MCP 테스트: runtime 을 IAM Gateway 의 target 으로 붙인다
+                "bedrock-agentcore:ListGatewayTargets", "bedrock-agentcore:GetGatewayTarget",
+                "bedrock-agentcore:CreateGatewayTarget"]},
             # 에이전트 생성: harness 를 만들고, Gateway 키를 AgentCore Identity 에 저장하며, harness 실행 역할을 넘긴다
             {"Sid": "CreateAgents", "Effect": "Allow", "Resource": "*", "Action": [
                 # CreateHarness 에 tags 를 넘기므로 TagResource 도 필요하다(없으면 AccessDenied)
@@ -947,6 +957,9 @@ def create_ecs_roles(secret_arns: List[str]) -> Dict[str, str]:
             # 영구 저장소: 이 테이블 하나만. Scan 은 통계·검색을 서버에서 집계하기 위한 것(데이터가 작다)
             {"Sid": "PortalTable", "Effect": "Allow", "Resource": [f"arn:aws:dynamodb:{region}:{account_id}:table/{DDB_TABLE}"],
              "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:Scan"]},
+            # Playground 대화 저장소(사용자·agent 별 task 와 메시지). 목록은 Query 로만 읽으므로 Scan 은 주지 않는다
+            {"Sid": "PlaygroundTable", "Effect": "Allow", "Resource": [f"arn:aws:dynamodb:{region}:{account_id}:table/{PLAYGROUND_DDB_TABLE}"],
+             "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem", "dynamodb:Query"]},
             # MCP 접속 토큰: 로그인한 사용자를 Cognito 에 만들고, 서버(gateway)별 사용 승인 그룹을 관리하고, 토큰을 발급한다.
             # 이 사용자 풀 하나로만 제한한다(다른 풀은 건드리지 못한다).
             {"Sid": "McpTokenCognito", "Effect": "Allow", "Resource": [cognito_pool_arn()],
@@ -1170,6 +1183,7 @@ def deploy_ecs(net: Dict[str, Any], alb: Dict[str, str], roles: Dict[str, str], 
         "LLM_GATEWAY_URL": read_env_file("LLM_GATEWAY_URL") or "https://llm.my-agentic-ai.click",
         # config.json 은 이미지에 넣지 않는다(.dockerignore) — 앱이 쓰는 값은 환경 변수로 전달한다
         "PORTAL_STORE": "dynamodb", "DDB_TABLE": DDB_TABLE,        # 재배포해도 유지되는 저장소
+        "PLAYGROUND_DDB_TABLE": PLAYGROUND_DDB_TABLE,              # Playground 대화(task) 저장소
         "REGISTRY_ID": load_config().get("registry_id", ""),
         "HARNESS_ARN": load_config().get("harness_arn", ""),
         "GATEWAY_REGIONS": read_env_file("GATEWAY_REGIONS"),

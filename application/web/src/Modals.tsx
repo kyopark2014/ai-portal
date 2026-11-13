@@ -226,13 +226,15 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
             <div><dt>리전</dt><dd>{d.region}</dd></div>
             <div className="wide-row"><dt>MCP endpoint</dt><dd className="mono sm arn">{d.endpoint || "-"}</dd></div>
           </dl>
-          {(usage?.can_use ?? true) && (<>
-            <McpHowTo item={item} />
+          {(usage?.can_use ?? true) && <McpHowTo item={item} />}
+          {(d.authorizer === "AWS_IAM" || (usage?.can_use ?? true)) && (<>
             <h3>테스트 <span className="hint">harness agent</span></h3>
             <McpTest key={item.id} item={item} /></>)}
         </>)}
 
-        {item.kind === "mcp" && usage && !usage.can_use && <p className="hint">사용 신청이 승인되면 이 MCP 를 테스트할 수 있습니다.</p>}
+        {item.kind === "mcp" && usage && !usage.can_use && <p className="hint">{d.kind === "gateway" && d.authorizer === "AWS_IAM"
+          ? "사용 신청이 승인되면 사용 방법이 표시됩니다. IAM 인증 MCP 는 승인 전에도 테스트할 수 있습니다."
+          : "사용 신청이 승인되면 이 MCP 를 테스트할 수 있습니다."}</p>}
 
         {item.kind === "mcp" && d.kind === "runtime" && (<>
           <h3>AgentCore Runtime (MCP)</h3>
@@ -244,6 +246,9 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
             <div className="wide-row"><dt>ARN</dt><dd className="mono sm arn">{d.arn}</dd></div>
             <div className="wide-row"><dt>MCP endpoint</dt><dd className="mono sm arn">{d.endpoint || "-"}</dd></div>
           </dl>
+          {(d.auth !== "JWT" || (usage?.can_use ?? true)) && (<>
+            <h3>테스트 <span className="hint">harness agent</span></h3>
+            <McpTest key={item.id} item={item} /></>)}
         </>)}
 
         {item.kind === "mcp" && d.kind !== "gateway" && d.kind !== "runtime" && (usage?.can_use ?? true) && (<>
@@ -267,9 +272,9 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
             {d.protocol && <div><dt>프로토콜</dt><dd>{d.protocol}</dd></div>}
             <div><dt>인증</dt><dd>{d.auth === "JWT" ? "JWT (Cognito 토큰)" : d.auth === "IAM" ? "IAM (SigV4)" : "확인 중"}</dd></div>
             {d.arn && <div className="wide-row"><dt>ARN</dt><dd className="mono sm arn">{d.arn}</dd></div>}</dl>
-          {usage && !usage.can_use && <p className="hint">사용 신청이 승인되면 이 Agent 를 테스트할 수 있습니다.</p>}
-          {d.arn && !(d.agent_type === "runtime" && d.protocol === "MCP") && (usage?.can_use ?? true) && (<>
-            <AgentHowTo item={item} />
+          {usage && !usage.can_use && <p className="hint">{d.auth === "JWT" ? "사용 신청이 승인되면 이 Agent 를 테스트할 수 있습니다(접속한 사용자의 Cognito 토큰으로 호출합니다)." : "사용 신청이 승인되면 사용 방법이 표시됩니다. IAM 인증 Agent 는 승인 전에도 테스트할 수 있습니다."}</p>}
+          {d.arn && !(d.agent_type === "runtime" && d.protocol === "MCP") && (d.auth !== "JWT" || (usage?.can_use ?? true)) && (<>
+            {(usage?.can_use ?? true) && <AgentHowTo item={item} />}
             <h3>테스트 <span className="hint">{d.agent_type === "harness" ? "harness" : "AgentCore runtime"}{d.auth === "JWT" && " · JWT: 포털이 내 Cognito 토큰으로 호출"}</span></h3>
             <McpTest key={item.id} item={item} /></>)}
           {d.agent_type === "runtime" && d.protocol === "MCP" && <p className="hint">MCP 프로토콜 runtime은 대화형 agent가 아니라 MCP 서버입니다. MCP 탭에서 테스트하세요.</p>}
@@ -303,7 +308,7 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
         ) : reg && !reg.registry_id ? (
           <p className="hint">연결된 Registry가 없습니다. 설치(<code>installer.py</code>)로 Registry를 먼저 만들어야 합니다.</p>
         ) : item.can_edit ? (
-          <button className="btn" disabled={busy || !reg} onClick={() => run(() => api.registerItem(item.kind, item.id), (i) => { upd(i); setMsg("Registry에 DRAFT로 등록했습니다."); })}>Registry 등록 다시 시도</button>
+          <button className="btn" disabled={busy || !reg} onClick={() => run(() => api.registerItem(item.kind, item.id), (i) => { upd(i); setMsg("Registry에 DRAFT로 등록했습니다."); })}>Registry 등록 시도</button>
         ) : null}
 
         {user.role === "admin" && item.registry_record_id && (
