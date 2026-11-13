@@ -3,6 +3,7 @@ import * as api from "./api";
 import type { Dashboard, Kind } from "./api";
 import { ago } from "./Explore";
 import ConfirmDialog, { type ConfirmSpec } from "./ConfirmDialog";
+import LogViewer from "./LogViewer";
 
 const KIND_LABEL: Record<string, string> = { prompt: "Prompt", mcp: "MCP", skill: "Skill", agent: "Agent" };
 const KINDS: Kind[] = ["prompt", "mcp", "skill", "agent"];
@@ -23,6 +24,7 @@ function Counts({ c }: { c?: Record<string, number> }) {
 }
 
 export default function AdminDashboard() {
+  const [tab, setTab] = useState<"stats" | "logs">("stats");
   const [d, setD] = useState<Dashboard | null>(null);
   const [err, setErr] = useState("");
   const [q, setQ] = useState("");
@@ -37,6 +39,12 @@ export default function AdminDashboard() {
     <section aria-labelledby="ad-h">
       <div className="page-head"><h1 id="ad-h">관리</h1>
         <button type="button" className="btn ghost" onClick={load} disabled={loading}>새로고침</button></div>
+      <div className="seg" role="tablist" aria-label="관리 메뉴" style={{ marginBottom: ".8rem" }}>
+        <button type="button" role="tab" aria-selected={tab === "stats"} className={tab === "stats" ? "on" : ""} onClick={() => setTab("stats")}>현황</button>
+        <button type="button" role="tab" aria-selected={tab === "logs"} className={tab === "logs" ? "on" : ""} onClick={() => setTab("logs")}>로그 확인</button>
+      </div>
+      {tab === "logs" && <LogViewer />}
+      {tab === "stats" && <>
       {err && <p className="note error" role="alert">{err}</p>}
       {!d && loading && <p className="sub">불러오는 중…</p>}
 
@@ -85,6 +93,7 @@ export default function AdminDashboard() {
 
         <RegistryCard />
       </>)}
+      </>}
     </section>
   );
 }

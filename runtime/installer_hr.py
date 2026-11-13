@@ -47,7 +47,7 @@ DB_NAME = "hrdb"
 DB_MASTER_USER = "hradmin"
 DB_SUBNET_GROUP = f"{project_name}-hr-subnet"
 DB_SG_NAME = f"hr-aurora-for-{project_name}"
-RUNTIME_NAME = f"hr_advisor_of_{project_name}".replace("-", "_")
+RUNTIME_NAME = "hr_advisor"
 GATEWAY_TARGET_NAME = "hr-advisor"
 DEFAULT_MODEL_ID = "global.anthropic.claude-sonnet-4-6"
 
@@ -721,6 +721,7 @@ def create_or_update_hr_advisor_mcp_runtime(
             networkConfiguration={"networkMode": "PUBLIC"},
             protocolConfiguration={"serverProtocol": "MCP"},
             environmentVariables=env_vars,
+            platformVersion="V2",
         )
         agent_runtime_arn = response["agentRuntimeArn"]
         runtime_id = response.get("agentRuntimeId") or runtime_id
@@ -736,6 +737,7 @@ def create_or_update_hr_advisor_mcp_runtime(
             roleArn=role_arn,
             protocolConfiguration={"serverProtocol": "MCP"},
             environmentVariables=env_vars,
+            platformVersion="V2",
         )
         agent_runtime_arn = response["agentRuntimeArn"]
         runtime_id = response["agentRuntimeId"]

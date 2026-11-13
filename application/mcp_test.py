@@ -47,7 +47,16 @@ def tool_for(item: dict, bearer: str | None = None) -> dict:
     d = item["data"]
     name = _TOOLNAME.sub("_", item["name"])[:40] or "mcp"
     if d.get("kind") == "runtime":
-        if d.get("auth") == "JWT":                      # runtime 은 인터셉터를 거치지 않는다 — 사용 승인은 포털이 이미 확인했다
+        # 승인 프로세스: 연결된 JWT Gateway 를 MCP 로 붙여 테스트한다(인터셉터가 사용 승인을 검사).
+        if d.get("approval_required"):
+            url = d.get("approval_gateway_endpoint") or ""
+            if not d.get("approval_gateway_id") or not url:
+                raise HTTPException(422, "승인 프로세스용 JWT Gateway 를 먼저 연결하세요")
+            if not bearer:
+                raise HTTPException(422, "JWT Gateway 를 테스트하려면 접속 토큰이 필요합니다")
+            return {"type": "remote_mcp", "name": name, "config": {"remoteMcp": {
+                "url": url, "headers": {"Authorization": f"Bearer {bearer}"}}}}
+        if d.get("auth") == "JWT":                      # 승인 불필요: runtime 을 직접 호출(인터셉터 없음)
             if not bearer:
                 raise HTTPException(422, "JWT 인증 MCP 를 테스트하려면 접속 토큰이 필요합니다")
             return {"type": "remote_mcp", "name": name, "config": {"remoteMcp": {"url": d["endpoint"], "headers": {"Authorization": f"Bearer {bearer}"}}}}
@@ -317,7 +326,15 @@ def chat(item_id: int, body: McpChatIn, user: auth.User = Depends(auth.current_u
     it, arn, history = _prepare(item_id, "mcp", body, user)
     bearer = None
     d = it["data"] or {}
-    if d.get("kind") == "runtime" and d.get("auth") != "JWT":
+    if d.get("kind") == "runtime" and d.get("approval_required"):
+        # 승인 프로세스: 연결된 JWT Gateway 로 테스트(그룹·토큰 발급은 CUSTOM_JWT Gateway 와 같다)
+        gid = d.get("approval_gateway_id") or ""
+        if not gid or not d.get("approval_gateway_endpoint"):
+            raise HTTPException(422, "승인 프로세스용 JWT Gateway 를 먼저 연결하세요")
+        from . import mcp_token
+        mcp_token.grant(user.email, gid)
+        bearer = mcp_token.issue(user.email)["access_token"]
+    elif d.get("kind") == "runtime" and d.get("auth") != "JWT":
         try:
             aws.ensure_runtime_gateway_target(catalog.config_value("gateway_iam_id"), it["name"], d.get("endpoint", ""))
         except Exception as e:  # noqa: BLE001

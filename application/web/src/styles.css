@@ -187,6 +187,9 @@ td .hint{margin:.1rem 0 0}
 /* MCP 사용 신청 */
 .usage{border:1px solid var(--line);border-radius:10px;padding:.2rem .9rem .9rem;background:var(--paper)}
 .usage h3{margin-top:.7rem}
+.progress{display:flex;align-items:center;gap:.65rem;margin:.5rem 0;padding:.65rem .8rem;border-radius:8px;background:rgba(178,95,18,.1);color:var(--amber);font-size:.88rem}
+.spinner{flex:none;width:1rem;height:1rem;border:2px solid rgba(178,95,18,.25);border-top-color:var(--amber);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 
 /* 표(관리·사용 신청·내 레코드): 헤더/셀 정렬, 숫자는 오른쪽, 행 구분선 */
 .tablewrap{overflow-x:auto;margin:.4rem 0 .6rem}
@@ -234,3 +237,7 @@ td .hint{margin:.1rem 0 0}
 .list-table .acts{display:flex;gap:.8rem;justify-content:flex-end}
 
 /* MCP 접속 토큰 */
+
+/* 로그 확인 */
+.check{display:flex;align-items:center;gap:.5rem;font-size:.9rem;margin:.2rem 0}
+.check input{width:auto}

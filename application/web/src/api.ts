@@ -39,6 +39,11 @@ async function callErr<T>(path: string, init?: RequestInit): Promise<T> {
 }
 export const listItems = (kind: Kind, q = "") => callErr<{ items: Item[] }>(`/api/catalog/${kind}?q=${encodeURIComponent(q)}`).then((r) => r.items);
 export const create = (path: string, body: unknown) => callErr<Item>(`/api/${path}`, json("POST", body));
+export const uploadSkill = (name: string, file: File, description: string) => {
+  const fd = new FormData();
+  fd.append("name", name); fd.append("description", description); fd.append("file", file);
+  return callErr<Item>("/api/skills/upload", { method: "POST", body: fd });   // Content-Type 은 브라우저가 boundary 와 함께 지정
+};
 export const updatePrompt = (id: number, body: unknown) => callErr<Item>(`/api/prompts/${id}`, json("PUT", body));
 export const refreshPrompt = (id: number) => callErr<Item>(`/api/prompts/${id}/refresh`, json("POST"));
 export const testMcp = (id: number) => callErr<{ status: number; tools_status: number; body: string }>(`/api/mcp/${id}/test`, json("POST"));
@@ -231,3 +236,24 @@ export interface AgentCreateBody {
   mcp_ids: number[]; skill_ids: number[]; auth: "IAM" | "JWT"; description?: string;
 }
 export const createAgent = (body: AgentCreateBody) => callErr<Item & { registry_error?: string }>("/api/agents/create", json("POST", body));
+
+// ── runtime MCP 승인 프로세스 / JWT Gateway ──
+export const listJwtGateways = () => callErr<{ items: Item[] }>("/api/gateways/jwt").then((r) => r.items);
+export const createGateway = (body: { name: string; description?: string }) =>
+  callErr<Item>("/api/gateways", json("POST", body));
+export const setRuntimeApproval = (id: number, body: { approval_required: boolean; gateway_item_id?: number | null }) =>
+  callErr<Item>(`/api/mcp/${id}/approval-config`, json("POST", body));
+
+// ── 로그 확인 (관리자) ──
+export interface LogTarget { id: string; name: string; item_id: number }
+export interface LogRow {
+  time: string; user_email: string | null; caller: string | null; method: string; mcp_target: string | null; tool: string | null;
+  arguments: string | null; blocked: boolean; block_reason: string | null; status: number | null; is_error: boolean;
+  error_message: string | null; resp_bytes: number | null; latency_ms: number | null;
+}
+export interface LogQuery { kind: "mcp" | "agent"; target: string; start: string; end: string; user: string; tool: string; all_methods: boolean; only_problems: boolean }
+export const logTargets = (kind: "mcp" | "agent") => callErr<{ targets: LogTarget[]; retention_days: number; note: string }>(`/api/admin/logs/targets?kind=${kind}`);
+export const logStart = (q: LogQuery) => callErr<{ query_id: string }>("/api/admin/logs/query", json("POST", q));
+export const logStatus = (id: string) => callErr<{ state: string; reason: string; scanned_bytes: number | null; millis: number | null }>(`/api/admin/logs/query/${id}`);
+export const logResults = (id: string) => callErr<{ columns: string[]; rows: LogRow[]; truncated: boolean; scanned_bytes: number | null }>(`/api/admin/logs/query/${id}/results`);
+export const logDownloadUrl = (id: string, format: "csv" | "json") => `/api/admin/logs/query/${id}/download?format=${format}`;

@@ -8,3 +8,4 @@ httpx
 boto3>=1.43.123
 langchain-anthropic
 langchain-openai
+python-multipart

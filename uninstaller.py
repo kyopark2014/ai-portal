@@ -79,6 +79,10 @@ logs = session.client("logs")
 secretsmanager = session.client("secretsmanager")
 cloudfront = session.client("cloudfront")
 events = session.client("events")
+s3 = session.client("s3")
+firehose = session.client("firehose")
+glue = session.client("glue")
+athena = session.client("athena")
 lam = session.client("lambda")
 ssm = session.client("ssm")
 agentcore = session.client("bedrock-agentcore-control")
@@ -460,11 +464,45 @@ def delete_secrets() -> None:
         attempt(f"시크릿 {name}", lambda name=name: secretsmanager.delete_secret(SecretId=name, ForceDeleteWithoutRecovery=True))
 
 
+def delete_log_pipeline() -> None:
+    """요청 로그 파이프라인(Firehose·Glue 테이블/DB·Athena 워크그룹·Firehose 역할). 데이터(logs/)는 버킷과 함께 지워진다."""
+    logger.info("[logs] Firehose / Glue / Athena")
+    attempt(f"Firehose {project_name}-logs", lambda: firehose.delete_delivery_stream(
+        DeliveryStreamName=f"firehose-{project_name}-logs", AllowForceDelete=True))
+    db_name = project_name.replace("-", "_")
+    attempt(f"Glue 테이블 {db_name}.request_logs", lambda: glue.delete_table(DatabaseName=db_name, Name="request_logs"))
+    attempt(f"Glue DB {db_name}", lambda: glue.delete_database(Name=db_name))
+    attempt(f"Athena 워크그룹 {project_name}-logs", lambda: athena.delete_work_group(
+        WorkGroup=f"{project_name}-logs", RecursiveDeleteOption=True))
+
+
+def delete_storage_bucket() -> None:
+    """Skill zip 버킷(버저닝이라 모든 버전·삭제 마커를 비운 뒤 삭제)."""
+    logger.info("[S3] Skill 저장소")
+    bucket = f"storage-for-{project_name}-{account_id}-{region}"
+
+    def go() -> None:
+        try:
+            s3.head_bucket(Bucket=bucket)
+        except ClientError as e:
+            if _gone(e) or _code(e) in ("404", "NoSuchBucket", "NotFound"):
+                return
+            raise
+        if DRY:
+            return
+        for page in s3.get_paginator("list_object_versions").paginate(Bucket=bucket):
+            objs = [{"Key": v["Key"], "VersionId": v["VersionId"]} for v in page.get("Versions", []) + page.get("DeleteMarkers", [])]
+            for i in range(0, len(objs), 1000):
+                s3.delete_objects(Bucket=bucket, Delete={"Objects": objs[i:i + 1000], "Quiet": True})
+        s3.delete_bucket(Bucket=bucket)
+    attempt(f"S3 버킷 {bucket}", go)
+
+
 # ── IAM ─────────────────────────────────────────────────────────────
 def delete_roles() -> None:
     logger.info("[I] IAM 역할")
     names = [f"role-ecs-task-for-{project_name}-{region}", f"role-ecs-execution-for-{project_name}-{region}",
-             f"role-harness-for-{project_name}-{region}", NOTIFY_ROLE]
+             f"role-harness-for-{project_name}-{region}", f"role-firehose-for-{project_name}-{region}", NOTIFY_ROLE]
     for rgn in sorted({region, WEBSEARCH_REGION}):
         names += [f"role-lambda-interceptor-for-{project_name}-{rgn}", f"role-gateway-for-{project_name}-{rgn}"]
     for name in names:
@@ -530,6 +568,9 @@ def main() -> None:
     if not args.keep_table:
         delete_table()
     delete_secrets()
+    if not args.keep_table:
+        delete_log_pipeline()
+        delete_storage_bucket()
     delete_vpc()
     delete_domain(args.keep_dns, certificate=False)
     delete_cloudfront()                   # 전파가 끝난 뒤 삭제

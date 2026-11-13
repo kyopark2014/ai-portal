@@ -1,9 +1,12 @@
 """레지스트리 탐색 REST: prompt / mcp / agent / skill 카탈로그 + 동기화 + Registry 등록."""
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
+import re
+import zipfile
 from pathlib import Path
 import threading
 import time
@@ -11,7 +14,7 @@ from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from . import admins, auth, aws, db, policy
@@ -262,6 +265,8 @@ def delete_item(kind: Kind, item_id: int, user: auth.User = Depends(auth.current
                 if "registry_record" in done:
                     db.update_item(item_id, registry_record_id=None, registry_status=None)
                 raise aws_err(e)
+    if kind == "skill":
+        _delete_skill_object(it)
     db.delete_usage_requests(item_id)
     db.delete_item(item_id)
     return {"ok": True, "deleted": done}
@@ -387,6 +392,137 @@ def test_mcp(item_id: int, user: auth.User = Depends(auth.current_user)):
         raise HTTPException(502, f"연결 실패: {type(e).__name__}")
 
 
+# ── runtime MCP 승인 프로세스(JWT Gateway 바인딩) + Gateway 생성 ──
+_GW_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,47}$")
+
+
+def _jwt_gateways() -> list[dict]:
+    """Registry(카탈로그)에 동기화된 CUSTOM_JWT AgentCore Gateway 목록."""
+    out = []
+    for it in db.list_items("mcp"):
+        d = it.get("data") or {}
+        if d.get("kind") == "gateway" and d.get("authorizer") == "CUSTOM_JWT":
+            out.append(it)
+    out.sort(key=lambda x: (x.get("name") or "").lower())
+    return out
+
+
+class ApprovalConfigIn(BaseModel):
+    approval_required: bool
+    gateway_item_id: Optional[int] = None
+
+
+@router.get("/gateways/jwt")
+def list_jwt_gateways(user: auth.User = Depends(auth.current_user)):
+    """승인 프로세스에 쓸 수 있는 JWT(CUSTOM_JWT) Gateway 목록."""
+    return {"items": [_view(it, user) for it in _jwt_gateways()]}
+
+
+class GatewayCreateIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=48)
+    description: str = Field("", max_length=200)
+
+
+@router.post("/gateways")
+def create_agentcore_gateway(body: GatewayCreateIn, user: auth.User = Depends(auth.current_user)):
+    """CUSTOM_JWT AgentCore Gateway 를 새로 만들고 카탈로그에 넣는다(승인 프로세스용)."""
+    name = body.name.strip()
+    if not _GW_NAME.match(name):
+        raise HTTPException(422, "Gateway 이름은 영문으로 시작하고 영문·숫자·_·- 만 쓸 수 있습니다(최대 48자)")
+    for it in db.list_items("mcp"):
+        d = it.get("data") or {}
+        if d.get("kind") == "gateway" and it["name"] == name:
+            raise HTTPException(409, f"이미 같은 이름의 Gateway 가 있습니다: {name}")
+    try:
+        info = aws.create_jwt_gateway(name, body.description.strip())
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    except (ClientError, BotoCoreError) as e:
+        raise aws_err(e)
+    reg = info["region"]
+    data = {"kind": "gateway", "endpoint": info.get("gateway_url", ""), "gateway_id": info["gateway_id"],
+            "status": info.get("status", "READY"), "authorizer": "CUSTOM_JWT", "protocol": "MCP",
+            "region": reg, "headers": [], "approved_users": []}
+    ext = f"gateway:{reg}:{info['gateway_id']}"
+    iid = db.insert_item("mcp", name, body.description.strip(), user.email, data, "aws", ext)
+    return _view(db.get_item(iid), user)
+
+
+@router.post("/mcp/{item_id}/approval-config")
+def set_runtime_approval_config(item_id: int, body: ApprovalConfigIn, user: auth.User = Depends(auth.current_user)):
+    """runtime MCP 의 승인 프로세스 설정. 필요하면 JWT Gateway 를 고르고 target 으로 붙인다."""
+    it = visible_item(item_id, user, "mcp")
+    if not _can_edit(user, it):
+        raise HTTPException(403, "이 MCP 의 승인 설정을 바꿀 권한이 없습니다")
+    d = dict(it.get("data") or {})
+    if d.get("kind") != "runtime":
+        raise HTTPException(422, "AgentCore Runtime(MCP) 에만 승인 프로세스를 설정할 수 있습니다")
+
+    if not body.approval_required:
+        # 승인 불필요로 바꾸면 연결되어 있던 JWT Gateway target 을 제거한다
+        old_gid = d.get("approval_gateway_id") or ""
+        old_tid = d.get("approval_target_id") or None
+        if old_gid:
+            try:
+                aws.remove_runtime_gateway_target(old_gid, it["name"], old_tid)
+            except RuntimeError as e:
+                raise HTTPException(400, str(e))
+            except (ClientError, BotoCoreError) as e:
+                raise aws_err(e)
+        for k in ("approval_gateway_id", "approval_gateway_item_id", "approval_gateway_name",
+                  "approval_gateway_endpoint", "approval_target_id"):
+            d.pop(k, None)
+        d["approval_required"] = False
+        db.update_item(item_id, data=d)
+        from . import usage
+        # Gateway 의 approved_users 에서 이 runtime 승인자를 다시 계산한다
+        if old_gid:
+            usage.sync_approved_users({**it, "data": {**d, "approval_required": True, "approval_gateway_id": old_gid}})
+        return _view(db.get_item(item_id), user)
+
+    d["approval_required"] = True
+    if body.gateway_item_id is None:
+        db.update_item(item_id, data=d)
+        return _view(db.get_item(item_id), user)
+
+    gw = visible_item(body.gateway_item_id, user, "mcp")
+    gd = gw.get("data") or {}
+    if gd.get("kind") != "gateway" or gd.get("authorizer") != "CUSTOM_JWT":
+        raise HTTPException(422, "승인 프로세스에는 JWT(CUSTOM_JWT) AgentCore Gateway 만 사용할 수 있습니다")
+    endpoint = d.get("endpoint") or ""
+    if not endpoint:
+        raise HTTPException(422, "runtime MCP endpoint 가 없어 Gateway target 을 만들 수 없습니다")
+    # 다른 Gateway 에 붙어 있던 target 은 먼저 제거한다
+    prev_gid = d.get("approval_gateway_id") or ""
+    if prev_gid and prev_gid != gd["gateway_id"]:
+        try:
+            aws.remove_runtime_gateway_target(prev_gid, it["name"], d.get("approval_target_id"))
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        except (ClientError, BotoCoreError) as e:
+            raise aws_err(e)
+    try:
+        tid = aws.ensure_runtime_gateway_target(gd["gateway_id"], it["name"], endpoint)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    except (ClientError, BotoCoreError) as e:
+        raise aws_err(e)
+    d.update({
+        "approval_gateway_id": gd["gateway_id"],
+        "approval_gateway_item_id": gw["id"],
+        "approval_gateway_name": gw["name"],
+        "approval_gateway_endpoint": gd.get("endpoint", ""),
+        "approval_target_id": tid,
+    })
+    db.update_item(item_id, data=d)
+    from . import usage
+    usage.sync_approved_users(db.get_item(item_id))
+    if prev_gid and prev_gid != gd["gateway_id"]:
+        usage.sync_approved_users({"id": item_id, "kind": "mcp",
+                                   "data": {"kind": "runtime", "approval_required": True, "approval_gateway_id": prev_gid}})
+    return _view(db.get_item(item_id), user)
+
+
 # ── Skill ──
 @router.post("/skills")
 def create_skill(body: SkillIn, user: auth.User = Depends(auth.current_user)):
@@ -404,6 +540,128 @@ def create_skill(body: SkillIn, user: auth.User = Depends(auth.current_user)):
     if body.description.strip():
         db.update_item(iid, desc_edited=1)
     return _created(iid, user)
+
+
+# ── Skill zip 업로드: s3://storage-for-{project}-{account}-{region}/skills/{user-id}/{skill 이름}/skill.zip ──
+MAX_SKILL_ZIP = 50 * 1024 * 1024
+
+
+def storage_bucket() -> str:
+    return os.environ.get("STORAGE_BUCKET", "").strip() or config_value("storage_bucket")
+
+
+def skill_prefix(email: str, name: str) -> str:
+    uid = re.sub(r"[^A-Za-z0-9._@+-]", "_", email)
+    return f"skills/{uid}/{aws.skill_slug(name)}/"
+
+
+MAX_UNZIPPED = 200 * 1024 * 1024
+MAX_FILES = 2000
+
+
+def _extract_members(z: zipfile.ZipFile) -> list[tuple[str, zipfile.ZipInfo]]:
+    """zip 항목 → (S3 상대 경로, info). 경로 탈출·숨김 메타데이터를 거르고, 최상위 폴더가 하나뿐이면 벗겨 SKILL.md 가 루트에 오게 한다."""
+    items = []
+    total = 0
+    for i in z.infolist():
+        n = i.filename.replace("\\", "/")
+        if i.is_dir() or n.startswith("__MACOSX/") or n.rsplit("/", 1)[-1] == ".DS_Store":
+            continue
+        parts = n.split("/")
+        if n.startswith("/") or ".." in parts or "" in parts:
+            raise HTTPException(422, f"zip 에 허용되지 않는 경로가 있습니다: {n}")
+        total += i.file_size
+        items.append((n, i))
+    if not items or len(items) > MAX_FILES or total > MAX_UNZIPPED:
+        raise HTTPException(422, f"zip 파일은 1~{MAX_FILES}개 파일, 압축 해제 {MAX_UNZIPPED // 1024 // 1024}MB 이하여야 합니다")
+    tops = {n.split("/", 1)[0] for n, _ in items}
+    if len(tops) == 1 and all("/" in n for n, _ in items):
+        items = [(n.split("/", 1)[1], i) for n, i in items]
+    if not any(n.lower() == "skill.md" for n, _ in items):
+        raise HTTPException(422, "zip 의 최상위(또는 단일 최상위 폴더 바로 아래)에 SKILL.md 가 있어야 합니다")
+    return items
+
+
+@router.post("/skills/upload")
+async def upload_skill(name: str = Form(..., min_length=1, max_length=100), description: str = Form("", max_length=1024),
+                       file: UploadFile = File(...), user: auth.User = Depends(auth.current_user)):
+    """zip 을 S3 에 올리고 S3 skill 로 한 번에 등록한다.
+
+    skills/{user-id}/{이름}/skill.zip 에 원본을 보관하고, harness 가 읽을 수 있도록(harness 의 S3 source 는 zip 이 아니라
+    디렉터리다) 같은 위치의 contents/ 에 압축을 풀어 올린다. 등록 단계가 실패하면 올린 파일을 지운다.
+    """
+    bucket = storage_bucket()
+    if not bucket:
+        raise HTTPException(503, "skill 저장소 S3 버킷이 설정되지 않았습니다(installer 를 다시 실행하세요)")
+    _ensure_name_free(name)
+    buf, size = io.BytesIO(), 0
+    while chunk := await file.read(1024 * 1024):
+        size += len(chunk)
+        if size > MAX_SKILL_ZIP:
+            raise HTTPException(413, f"zip 파일은 {MAX_SKILL_ZIP // 1024 // 1024}MB 이하여야 합니다")
+        buf.write(chunk)
+    if not size or not zipfile.is_zipfile(buf):
+        raise HTTPException(422, "올바른 zip 파일이 아닙니다")
+    prefix = skill_prefix(user.email, name)
+    key, contents = prefix + "skill.zip", prefix + "contents/"
+    data = {"source_type": "s3", "s3_uri": f"s3://{bucket}/{contents}", "object_version": "", "uploaded": True,
+            "s3_bucket": bucket, "s3_prefix": prefix, "s3_key": key, "source_label": f"s3://{bucket}/{key}"}
+    try:
+        s3 = aws.client("s3")
+        with zipfile.ZipFile(buf) as z:
+            members = _extract_members(z)
+            s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue(), ContentType="application/zip")
+            for rel, info in members:
+                s3.put_object(Bucket=bucket, Key=contents + rel, Body=z.read(info))
+    except zipfile.BadZipFile:
+        raise HTTPException(422, "올바른 zip 파일이 아닙니다")
+    except (ClientError, BotoCoreError) as e:
+        _delete_skill_object({"data": data, "owner": user.email})
+        raise aws_err(e)
+    except HTTPException:
+        raise
+    desc = description.strip() or f"S3 skill: {data['source_label']}"
+    try:
+        iid = db.insert_item("skill", name, desc, user.email, data)
+    except Exception:
+        _delete_skill_object({"data": data, "owner": user.email})
+        raise
+    if description.strip():
+        db.update_item(iid, desc_edited=1)
+    return _created(iid, user)
+
+
+def _owned_skill_prefix(it: dict) -> tuple[str, str] | None:
+    """삭제할 S3 폴더 (bucket, prefix). 포털 저장소의 skills/{소유자 user-id}/{이름}/ 아래를 가리키는 항목만 해당한다.
+
+    플래그가 아니라 URI 로 판단한다 — Registry 동기화로 복원된 항목에는 업로드 표시가 없다. 소유자 user-id 가 경로와 같아야 하므로
+    다른 사용자의 폴더 URI 를 직접 입력해 등록한 뒤 지우는 방식으로 남의 파일을 지울 수 없다.
+    """
+    d = it.get("data") or {}
+    if d.get("source_type") != "s3":
+        return None
+    m = re.match(r"^s3://([^/]+)/(skills/[^/]+/[^/]+/)(?:contents/?|skill\.zip/?)?$", d.get("s3_uri", ""))
+    if not m or m[1] != storage_bucket():
+        return None
+    uid = re.sub(r"[^A-Za-z0-9._@+-]", "_", it.get("owner") or "")
+    return (m[1], m[2]) if uid and m[2].split("/")[1] == uid else None
+
+
+def _delete_skill_object(it: dict) -> None:
+    """등록한 skill 의 zip·압축 해제 파일(skills/{user-id}/{이름}/ 전체)을 모든 버전까지 지운다. 실패해도 항목 삭제는 막지 않는다."""
+    target = _owned_skill_prefix(it)
+    if not target:
+        return
+    bucket, prefix = target
+    try:
+        s3 = aws.client("s3")
+        for page in s3.get_paginator("list_object_versions").paginate(Bucket=bucket, Prefix=prefix):
+            objs = [{"Key": v["Key"], "VersionId": v["VersionId"]} for v in page.get("Versions", []) + page.get("DeleteMarkers", [])]
+            for i in range(0, len(objs), 1000):
+                s3.delete_objects(Bucket=bucket, Delete={"Objects": objs[i:i + 1000], "Quiet": True})
+        log.info("skill 파일 삭제 s3://%s/%s", bucket, prefix)
+    except (ClientError, BotoCoreError) as e:
+        log.warning("skill 파일 삭제 실패 s3://%s/%s: %s", bucket, prefix, e)
 
 
 # ── Agent ──

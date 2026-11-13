@@ -7,6 +7,7 @@ export interface ConfirmSpec {
   cancelLabel?: string;
   danger?: boolean;
   onConfirm: () => void;
+  onCancel?: () => void;           // 취소/아니오를 눌렀을 때(Esc·바깥 클릭은 호출하지 않음)
 }
 
 /** 브라우저 기본 confirm() 대신 쓰는 앱 내 확인창. Esc/바깥 클릭=취소, 기본 포커스는 안전한 쪽(취소). */
@@ -25,7 +26,8 @@ export default function ConfirmDialog({ spec, onClose }: { spec: ConfirmSpec; on
         <h2 id="cf-t">{spec.title}</h2>
         <div id="cf-d">{spec.lines.map((l, i) => <p key={i}>{l}</p>)}</div>
         <div className="actions">
-          <button type="button" ref={cancel} className="btn ghost" onClick={onClose}>{spec.cancelLabel ?? "취소"}</button>
+          <button type="button" ref={cancel} className="btn ghost"
+            onClick={() => { onClose(); spec.onCancel?.(); }}>{spec.cancelLabel ?? "취소"}</button>
           <button type="button" className={`btn ${spec.danger ? "danger" : ""}`}
             onClick={() => { onClose(); spec.onConfirm(); }}>{spec.confirmLabel}</button>
         </div>

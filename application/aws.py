@@ -181,13 +181,135 @@ def runtime_info(runtime_id: str) -> dict:
         return {"protocol": "", "auth": ""}
 
 
-def ensure_runtime_gateway_target(gateway_id: str, name: str, endpoint: str, timeout: int = 120) -> None:
-    """IAM 인증 runtime MCP 를 IAM Gateway 의 target 으로 붙인다(이미 있으면 그대로). READY 가 될 때까지 기다린다.
+def project_name() -> str:
+    return os.environ.get("PROJECT_NAME") or "ai-portal"
+
+
+def gateway_role_arn() -> str:
+    """설치기가 만든 Gateway 서비스 역할 ARN (`role-gateway-for-<project>-<region>`)."""
+    return f"arn:aws:iam::{account_id()}:role/role-gateway-for-{project_name()}-{region()}"
+
+
+def _portal_config() -> dict:
+    from pathlib import Path
+    try:
+        return json.loads((Path(__file__).resolve().parent / "config.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def ensure_gateway_can_invoke_runtime() -> None:
+    """Gateway 역할이 AgentCore Runtime 을 호출할 수 있게 한다(이미 있으면 덮어쓴다). 권한 없으면 조용히 넘어간다."""
+    role_name = gateway_role_arn().rsplit("/", 1)[-1]
+    try:
+        client("iam").put_role_policy(
+            RoleName=role_name, PolicyName="portal-invoke-runtime",
+            PolicyDocument=json.dumps({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Sid": "InvokeAgentRuntime", "Effect": "Allow",
+                    "Action": ["bedrock-agentcore:InvokeAgentRuntime", "bedrock-agentcore:InvokeAgentRuntimeForUser"],
+                    "Resource": [f"arn:aws:bedrock-agentcore:{region()}:{account_id()}:runtime/*"],
+                }],
+            }))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def create_jwt_gateway(name: str, description: str = "") -> dict:
+    """CUSTOM_JWT AgentCore Gateway 를 만든다(포털 Cognito + interceptor 재사용). READY 가 될 때까지 기다린다.
+
+    반환: {gateway_id, gateway_arn, gateway_url, name, status, region, authorizer}
+    """
+    import time
+    cfg = _portal_config()
+    interceptor = (cfg.get("gateway_interceptor_lambda_arn") or cfg.get("interceptor_lambda_arn") or "").strip()
+    discovery = (cfg.get("cognito_discovery_url") or "").strip()
+    client_id = (cfg.get("cognito_client_id") or "").strip()
+    if not interceptor:
+        raise RuntimeError("config.json 에 gateway_interceptor_lambda_arn 이 없습니다. installer.py 를 먼저 실행하세요")
+    if not discovery or not client_id:
+        raise RuntimeError("config.json 에 Cognito(discovery_url/client_id) 가 없습니다. installer.py 를 먼저 실행하세요")
+    role = gateway_role_arn()
+    c = client("bedrock-agentcore-control")
+    created = c.create_gateway(
+        name=name,
+        description=(description or f"{name} MCP gateway (Cognito JWT auth, monitored by interceptor)")[:200],
+        roleArn=role, protocolType="MCP",
+        authorizerType="CUSTOM_JWT",
+        authorizerConfiguration={"customJWTAuthorizer": {
+            "discoveryUrl": discovery, "allowedClients": [client_id]}},
+        interceptorConfigurations=[{
+            "interceptor": {"lambda": {"arn": interceptor}},
+            "interceptionPoints": ["REQUEST", "RESPONSE"],
+            "inputConfiguration": {"passRequestHeaders": True},
+        }],
+        tags={"Project": project_name(), "CreatedBy": "ai-portal"})
+    gid = created["gatewayId"]
+    deadline = time.time() + 180
+    while True:
+        cur = c.get_gateway(gatewayIdentifier=gid)
+        st = cur.get("status", "")
+        if st == "READY":
+            return {"gateway_id": gid, "gateway_arn": cur.get("gatewayArn", ""),
+                    "gateway_url": cur.get("gatewayUrl", ""), "name": name, "status": st,
+                    "region": region(), "authorizer": "CUSTOM_JWT"}
+        if st.endswith("FAILED") or time.time() > deadline:
+            raise RuntimeError(f"Gateway {name}: {st or 'timeout'} {cur.get('statusReasons') or cur.get('statusReason', '')}")
+        time.sleep(3)
+
+
+def _is_not_found(e: Exception) -> bool:
+    code = ""
+    if hasattr(e, "response") and isinstance(getattr(e, "response", None), dict):
+        code = (e.response.get("Error") or {}).get("Code", "")  # type: ignore[attr-defined]
+    return "NotFound" in str(code) or "not found" in str(e).lower()
+
+
+def remove_runtime_gateway_target(gateway_id: str, name: str, target_id: str | None = None, timeout: int = 120) -> None:
+    """Gateway 에서 runtime MCP target 을 제거한다. 없거나 이미 지워졌으면 무시한다."""
+    import time
+    if not gateway_id:
+        return
+    c = client("bedrock-agentcore-control")
+    tid = target_id
+    tname = re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-")[:100] or "mcp"
+    if not tid:
+        for t in c.list_gateway_targets(gatewayIdentifier=gateway_id).get("items", []):
+            if t.get("name") == tname:
+                tid = t["targetId"]
+                break
+    if not tid:
+        return
+    try:
+        c.delete_gateway_target(gatewayIdentifier=gateway_id, targetId=tid)
+    except Exception as e:  # noqa: BLE001
+        if _is_not_found(e):
+            return
+        raise
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            st = c.get_gateway_target(gatewayIdentifier=gateway_id, targetId=tid).get("status", "")
+            if st.endswith("FAILED"):
+                raise RuntimeError(f"Gateway target {tname} 삭제 실패: {st}")
+        except Exception as e:  # noqa: BLE001
+            if _is_not_found(e):
+                return
+            if isinstance(e, RuntimeError):
+                raise
+        time.sleep(2)
+    # 타임아웃이어도 삭제는 요청됐으므로 호출부는 바인딩을 지운다
+
+
+def ensure_runtime_gateway_target(gateway_id: str, name: str, endpoint: str, timeout: int = 120) -> str:
+    """runtime MCP 를 Gateway 의 target 으로 붙인다(이미 있으면 그대로). READY 가 될 때까지 기다리고 targetId 를 돌려준다.
 
     target 이름은 gateway 안에서 유일해야 하고 영문·숫자·하이픈만 쓸 수 있어 record 이름(slug)을 하이픈으로 바꿔 쓴다.
     runtime target 은 GATEWAY_IAM_ROLE + iamCredentialProvider(bedrock-agentcore) 가 필수다(installer_hr.py 와 같다).
     """
     import time
+    ensure_gateway_can_invoke_runtime()
     c = client("bedrock-agentcore-control")
     tname = re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-")[:100] or "mcp"
     found = None
@@ -205,7 +327,7 @@ def ensure_runtime_gateway_target(gateway_id: str, name: str, endpoint: str, tim
     while True:
         st = c.get_gateway_target(gatewayIdentifier=gateway_id, targetId=found["targetId"]).get("status", "")
         if st == "READY":
-            return
+            return found["targetId"]
         if st.endswith("FAILED") or time.time() > deadline:
             raise RuntimeError(f"Gateway target {tname}: {st or 'timeout'}")
         time.sleep(3)

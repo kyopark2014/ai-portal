@@ -143,3 +143,81 @@ def test_mcp_chat_does_not_install_node(env, monkeypatch):
     _grant(iid)
     client("a@x.com").post(f"/api/mcp/{iid}/chat", json={"session_id": "u" * 36, "messages": [{"role": "user", "content": "hi"}]})
     assert calls == []
+
+
+# ── zip 업로드 ──
+def _zip(files):
+    import io, zipfile
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as z:
+        for n, c in files.items():
+            z.writestr(n, c)
+    return b.getvalue()
+
+
+class _S3:
+    def __init__(self): self.put = {}
+    def put_object(self, Bucket, Key, Body, ContentType=None): self.put[Key] = Body; return {}
+
+
+def _up(monkeypatch, files, name="My Skill"):
+    s3 = _S3()
+    monkeypatch.setenv("STORAGE_BUCKET", "bkt")
+    monkeypatch.setattr(aws, "client", lambda svc: s3)
+    monkeypatch.setattr(catalog, "_ensure_name_free", lambda *a, **k: None)
+    monkeypatch.setattr(catalog, "selected_registry", lambda: "")
+    r = client().post("/api/skills/upload", data={"name": name}, files={"file": ("s.zip", files, "application/zip")})
+    return r, s3
+
+
+def test_s3_zip_uri_is_a_directory():
+    assert src(source_type="s3", s3_uri="s3://b/skills/u/s/skill.zip") == {"s3": {"uri": "s3://b/skills/u/s/skill.zip/"}}
+
+
+def test_upload_extracts_to_contents_dir(env, monkeypatch):
+    r, s3 = _up(monkeypatch, _zip({"x/SKILL.md": "---\nname: x\n---", "x/scripts/a.py": "1"}))
+    assert r.status_code == 200, r.text
+    assert set(s3.put) == {"skills/a@x.com/my-skill/skill.zip", "skills/a@x.com/my-skill/contents/SKILL.md",
+                           "skills/a@x.com/my-skill/contents/scripts/a.py"}      # 단일 최상위 폴더(x/)는 벗긴다
+    assert r.json()["data"]["s3_uri"] == "s3://bkt/skills/a@x.com/my-skill/contents/"
+
+
+def test_upload_rejects_bad_zip(env, monkeypatch):
+    assert _up(monkeypatch, b"nope")[0].status_code == 422
+    assert _up(monkeypatch, _zip({"a.txt": "x"}))[0].status_code == 422
+    r, s3 = _up(monkeypatch, _zip({"SKILL.md": "x", "../evil": "x"}))
+    assert r.status_code == 422 and not s3.put
+
+
+class _Del:
+    def __init__(self, keys): self.keys, self.deleted = keys, []
+    def get_paginator(self, _):
+        outer = self
+        class P:
+            def paginate(self, Bucket, Prefix):
+                yield {"Versions": [{"Key": k, "VersionId": "1"} for k in outer.keys if k.startswith(Prefix)]}
+        return P()
+    def delete_objects(self, Bucket, Delete): self.deleted += [o["Key"] for o in Delete["Objects"]]
+
+
+def test_delete_skill_removes_s3_folder(env, monkeypatch):
+    s3 = _Del(["skills/a@x.com/my-skill/skill.zip", "skills/a@x.com/my-skill/contents/SKILL.md", "skills/a@x.com/other/skill.zip"])
+    monkeypatch.setenv("STORAGE_BUCKET", "bkt")
+    monkeypatch.setattr(aws, "client", lambda svc: s3)
+    # Registry 동기화로 복원된 항목처럼 업로드 표시가 없어도 URI 와 소유자로 판단한다
+    catalog._delete_skill_object({"owner": "a@x.com", "data": {"source_type": "s3", "s3_uri": "s3://bkt/skills/a@x.com/my-skill/contents/"}})
+    assert sorted(s3.deleted) == ["skills/a@x.com/my-skill/contents/SKILL.md", "skills/a@x.com/my-skill/skill.zip"]
+
+
+@pytest.mark.parametrize("owner,uri", [
+    ("b@x.com", "s3://bkt/skills/a@x.com/my-skill/contents/"),      # 남의 폴더
+    ("a@x.com", "s3://other/skills/a@x.com/my-skill/contents/"),    # 다른 버킷
+    ("a@x.com", "s3://bkt/skills/a@x.com/"),                        # 사용자 폴더 전체
+    ("a@x.com", "s3://bkt/docs/x/y/"),
+])
+def test_delete_skill_never_touches_foreign_paths(env, monkeypatch, owner, uri):
+    s3 = _Del(["skills/a@x.com/my-skill/skill.zip"])
+    monkeypatch.setenv("STORAGE_BUCKET", "bkt")
+    monkeypatch.setattr(aws, "client", lambda svc: s3)
+    catalog._delete_skill_object({"owner": owner, "data": {"source_type": "s3", "s3_uri": uri}})
+    assert s3.deleted == []

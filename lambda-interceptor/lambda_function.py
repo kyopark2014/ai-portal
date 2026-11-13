@@ -8,11 +8,13 @@ AgentCore Gateway `gw-ai-portal` 로 들어오는 MCP 요청(REQUEST)과 나가�
 이벤트/출력 형식: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-interceptors-types.html
 """
 import base64
+import hashlib
 import json
 import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
@@ -47,6 +49,11 @@ _clients: dict = {}
 _emails: dict = {}                                          # sub -> email (바뀌지 않으므로 캐시)
 _ids = {"at": 0.0, "map": {}}                               # gateway id -> 포털 MCP 항목 번호 (번호는 바뀌지 않아 잠깐 캐시)
 ID_CACHE_SECONDS = 60
+# ── 요청 로그(Firehose → S3 → Athena). 값이 없으면 기록하지 않는다 ──
+LOG_STREAM = os.environ.get("LOG_STREAM", "")                # Firehose delivery stream 이름
+LOG_REGION = os.environ.get("LOG_REGION", "") or "us-west-2"  # stream 이 있는 리전(gateway 리전과 다를 수 있다)
+IAM_GATEWAY_ID = os.environ.get("IAM_GATEWAY_ID", "")        # 이 리전의 IAM gateway. IAM 호출은 Host 헤더가 없어 gateway 를 이것으로 안다
+MAX_ARG_CHARS = 4000
 MISS_REFRESH_SECONDS = 10                                   # 모르는 gateway 때문에 매 요청 목록을 훑지 않도록
 
 
@@ -201,6 +208,104 @@ def _summary(point: str, mcp: dict, rpc: dict) -> dict:
     return {k: v for k, v in out.items() if v is not None}
 
 
+# ── 요청 로그 ────────────────────────────────────────────────────────
+# REQUEST 와 RESPONSE 를 각각 한 행으로 Firehose 에 보낸다. 포털(Athena)이 (target, rpc_id, req_hash) 로 두 행을 묶는다.
+#   rpc_id 는 클라이언트마다 1,2,3… 으로 시작해 겹치므로 요청 본문의 해시(req_hash)를 함께 쓴다.
+# CloudWatch 로그와 달리 여기에는 인자 값이 들어간다(자격 증명 키·토큰·AWS 키 형태는 가림). 응답 본문은 저장하지 않는다.
+# 기록 실패는 요청을 막지 않는다(짧은 타임아웃, 예외는 삼킨다).
+_VALUE_SECRET = re.compile(r"(eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|Bearer\s+[A-Za-z0-9._~+/=-]{12,})")
+
+
+def _scrub(o):
+    """인자 값에서 자격 증명으로 보이는 키의 값과, 값 자체가 JWT·AWS 키·Bearer 토큰 모양인 문자열을 가린다."""
+    if isinstance(o, dict):
+        return {k: ("<redacted>" if _SENSITIVE.search(str(k)) and not isinstance(v, (dict, list)) else _scrub(v)) for k, v in o.items()}
+    if isinstance(o, list):
+        return [_scrub(x) for x in o]
+    return _VALUE_SECRET.sub("<redacted>", o) if isinstance(o, str) else o
+
+
+def _safe_part(v) -> str:
+    """S3 경로(Firehose 파티션 값)에 쓸 수 있는 문자만 남긴다."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", str(v or ""))[:64] or "unknown"
+
+
+def _gateway_for_log(mcp: dict) -> str:
+    gw = _gateway_id(mcp)
+    if gw:
+        return gw
+    ctx = (mcp.get("gatewayRequest") or {}).get("context")
+    return IAM_GATEWAY_ID if IAM_GATEWAY_ID and isinstance(ctx, dict) and ctx.get("identity") else ""
+
+
+def _req_hash(body) -> str:
+    """REQUEST·RESPONSE 행을 묶는 보조 키. 본문 전체가 아니라 바뀔 수 없는 값(method·id·tool 이름)만 해시한다 —
+    RESPONSE 이벤트의 gatewayRequest.body 가 요청과 바이트 단위로 같다는 보장이 없기 때문이다."""
+    rpc = _rpc(body)
+    params = rpc.get("params") if isinstance(rpc.get("params"), dict) else {}
+    key = "|".join(str(x) for x in (rpc.get("method"), rpc.get("id"), params.get("name")))
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
+def _log_row(point: str, mcp: dict, rpc: dict, verdict: dict | None = None) -> dict:
+    greq = mcp.get("gatewayRequest") or {}
+    params = rpc.get("params") if isinstance(rpc.get("params"), dict) else {}
+    name = params.get("name") if isinstance(params.get("name"), str) else ""
+    mcp_target, _, tool = name.partition("___") if "___" in name else ("", "", name)
+    claims = _bearer_claims(greq.get("headers"))
+    email = None
+    if claims is not None and (rpc.get("method") or "") not in OPEN_METHODS:
+        try:
+            email = _email(claims)                           # decide() 가 이미 조회해 캐시에 있다
+        except Exception:  # noqa: BLE001
+            email = None
+    gw = _gateway_for_log(mcp)
+    now = datetime.now(timezone.utc)
+    row = {"ts": now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z", "dt": now.strftime("%Y-%m-%d"), "kind": "mcp", "target": _safe_part(gw),
+           "point": point, "rpc_id": "" if rpc.get("id") is None else str(rpc.get("id")), "req_hash": _req_hash(greq.get("body")),
+           "gateway": gw, "method": rpc.get("method") or "", "mcp_target": mcp_target, "tool": tool,
+           "caller": _caller(mcp) or "", "user_email": email or "", "auth": "jwt" if claims is not None else "iam"}
+    if point == "REQUEST":
+        args = params.get("arguments")
+        if args is not None:
+            text = json.dumps(_scrub(args), ensure_ascii=False)
+            row["arguments"] = text if len(text) <= MAX_ARG_CHARS else text[:MAX_ARG_CHARS] + "…(truncated)"
+        row["blocked"] = bool(verdict and verdict.get("action") == "block")
+        if row["blocked"]:
+            row["block_reason"] = (verdict or {}).get("message", "")
+    else:
+        resp = mcp.get("gatewayResponse") or {}
+        body = _rpc(resp.get("body"))
+        err = body.get("error") if isinstance(body.get("error"), dict) else None
+        row.update({"status": resp.get("statusCode"), "is_error": bool(body.get("error")) or bool((body.get("result") or {}).get("isError")),
+                    "error_message": str(err.get("message", ""))[:300] if err else "",
+                    "resp_bytes": len(json.dumps(resp.get("body"), ensure_ascii=False)) if resp.get("body") is not None else 0})
+    return row
+
+
+def _emit(row: dict) -> None:
+    if not LOG_STREAM:
+        return
+    try:
+        if "firehose" not in _clients:
+            import boto3
+            from botocore.config import Config
+            _clients["firehose"] = boto3.client("firehose", region_name=LOG_REGION,
+                                                config=Config(connect_timeout=2, read_timeout=3, retries={"max_attempts": 2}))
+        _clients["firehose"].put_record(DeliveryStreamName=LOG_STREAM, Record={"Data": json.dumps(row, ensure_ascii=False).encode()})
+    except Exception as e:  # noqa: BLE001 — 기록 실패로 요청을 막지 않는다
+        log.warning(json.dumps({"interceptor": "ai-portal", "log_emit_failed": type(e).__name__}))
+
+
+def _emit_safe(point: str, mcp: dict, rpc: dict, verdict: dict | None = None) -> None:
+    if not LOG_STREAM:
+        return
+    try:
+        _emit(_log_row(point, mcp, rpc, verdict))
+    except Exception as e:  # noqa: BLE001
+        log.warning(json.dumps({"interceptor": "ai-portal", "log_row_failed": type(e).__name__}))
+
+
 def handler(event, _ctx):
     mcp = event.get("mcp") or {}
     is_response = bool(mcp.get("gatewayResponse"))               # REQUEST 이벤트에도 키는 있고 값이 null 이다(실측)
@@ -209,6 +314,7 @@ def handler(event, _ctx):
     log.info(json.dumps({"interceptor": "ai-portal", **_summary(point, mcp, req)}, ensure_ascii=False))
 
     if is_response:                                             # 응답은 그대로 돌려보낸다
+        _emit_safe("RESPONSE", mcp, req)
         resp = mcp.get("gatewayResponse") or {}
         out = {"body": resp.get("body", {})}
         if resp.get("statusCode") is not None:
@@ -221,6 +327,7 @@ def handler(event, _ctx):
     if verdict["action"] == "block" and not ENFORCE:
         log.info(json.dumps({"interceptor": "ai-portal", "would_block": True, "method": req.get("method"), "reason": verdict.get("message")}))
         verdict = {"action": "accept"}
+    _emit_safe("REQUEST", mcp, req, verdict)
     if verdict["action"] == "block":                            # transformedGatewayResponse 가 있으면 target 으로 가지 않고 바로 응답한다
         log.info(json.dumps({"interceptor": "ai-portal", "blocked": True, "method": req.get("method"), "caller": _caller(mcp),
                              "gateway": _gateway_id(mcp)}))

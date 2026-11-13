@@ -36,18 +36,159 @@ function Field({ label, hint, children, count }: { label: string; hint?: string;
 }
 
 const MODELS = ["", "anthropic.claude-sonnet-4-5-20250929-v1:0", "us.anthropic.claude-haiku-4-5-20251001-v1:0", "amazon.nova-pro-v1:0"];
+const GW_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,47}$/;
+
+/** runtime MCP → JWT Gateway 선택·생성 (승인 프로세스). */
+function RuntimeApprovalPanel({
+  item, canEdit, busy, onBusy, onUpdated, onMsg, onErr,
+}: {
+  item: Item; canEdit: boolean; busy: boolean;
+  onBusy: (v: boolean) => void; onUpdated: (i: Item) => void;
+  onMsg: (s: string) => void; onErr: (s: string) => void;
+}) {
+  const d = item.data;
+  const [gateways, setGateways] = useState<Item[]>([]);
+  const [loadingGw, setLoadingGw] = useState(false);
+  const [sel, setSel] = useState<number | "">(d.approval_gateway_item_id ?? "");
+  const [creating, setCreating] = useState(false);
+  const [gwName, setGwName] = useState("");
+  const [gwDesc, setGwDesc] = useState("");
+  const [progress, setProgress] = useState("");   // Gateway target 등록 등 진행 중 문구
+
+  const loadGw = () => {
+    setLoadingGw(true);
+    api.listJwtGateways().then((list) => {
+      setGateways(list);
+      if (sel === "" && list.length === 1) setSel(list[0].id);
+    }).catch((e) => onErr(e.message)).finally(() => setLoadingGw(false));
+  };
+  useEffect(() => { if (d.approval_required) loadGw(); }, [d.approval_required, item.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function bind(gatewayItemId: number) {
+    const gw = gateways.find((g) => g.id === gatewayItemId);
+    onBusy(true); onErr(""); onMsg("");
+    setProgress(`Gateway${gw ? ` "${gw.name}"` : ""} 에 target 등록 중… READY 가 될 때까지 기다립니다.`);
+    try {
+      const r = await api.setRuntimeApproval(item.id, { approval_required: true, gateway_item_id: gatewayItemId });
+      onUpdated(r); onMsg(`승인 Gateway 로 "${r.data.approval_gateway_name}" 을(를) 연결했습니다.`);
+    } catch (e: any) { onErr(e.message); }
+    setProgress(""); onBusy(false);
+  }
+
+  async function createGw(e: React.FormEvent) {
+    e.preventDefault();
+    if (!GW_NAME_RE.test(gwName)) { onErr("Gateway 이름은 영문으로 시작하고 영문·숫자·_·- 만 쓸 수 있습니다."); return; }
+    onBusy(true); onErr(""); onMsg("");
+    setProgress(`Gateway "${gwName.trim()}" 생성 중…`);
+    try {
+      const created = await api.createGateway({ name: gwName.trim(), description: gwDesc.trim() });
+      setCreating(false); setGwName(""); setGwDesc("");
+      setGateways((p) => [...p, created].sort((a, b) => a.name.localeCompare(b.name)));
+      setSel(created.id);
+      setProgress(`Gateway "${created.name}" 에 target 등록 중… READY 가 될 때까지 기다립니다.`);
+      await bind(created.id);
+    } catch (e: any) { onErr(e.message); setProgress(""); onBusy(false); }
+  }
+
+  if (!d.approval_required) {
+    return canEdit ? (
+      <p className="hint">승인 프로세스를 쓰지 않습니다.
+        <button type="button" className="link" disabled={busy}
+          onClick={() => { onBusy(true); api.setRuntimeApproval(item.id, { approval_required: true })
+            .then((r) => { onUpdated(r); onMsg("승인 프로세스가 필요합니다. JWT Gateway 를 선택하세요."); })
+            .catch((e) => onErr(e.message)).finally(() => onBusy(false)); }}> 승인 필요로 바꾸기</button></p>
+    ) : null;
+  }
+
+  return (
+    <div className="usage" role="region" aria-label="승인 프로세스">
+      <h3>승인 프로세스 <span className="badge st-PENDING_APPROVAL">승인 필요</span></h3>
+      <p className="hint">JWT(CUSTOM_JWT) AgentCore Gateway 를 통해 사용 승인을 강제합니다. 인터셉터가 승인자 목록을 확인합니다.</p>
+      {progress && (
+        <div className="progress" role="status" aria-live="polite">
+          <span className="spinner" aria-hidden />
+          <span>{progress}</span>
+        </div>
+      )}
+      {d.approval_gateway_id ? (
+        <dl className="kv">
+          <div><dt>연결된 Gateway</dt><dd>{d.approval_gateway_name || d.approval_gateway_id}</dd></div>
+          <div><dt>Gateway ID</dt><dd className="mono sm">{d.approval_gateway_id}</dd></div>
+          {d.approval_gateway_endpoint && <div className="wide-row"><dt>Gateway endpoint</dt><dd className="mono sm arn">{d.approval_gateway_endpoint}</dd></div>}
+        </dl>
+      ) : null}
+      {canEdit && (<>
+        {loadingGw ? <p className="hint">Gateway 목록 불러오는 중…</p> : gateways.length === 0 && !creating ? (
+          <p className="note" role="status">선택할 수 있는 JWT Gateway 가 없어 승인 프로세스를 할 수 없습니다. 먼저 AgentCore Gateway 를 생성하세요.</p>
+        ) : !creating && (
+          <div className="row" style={{ alignItems: "center" }}>
+            <label className="field" style={{ flex: 1, margin: 0 }}>
+              <span className="lbl">JWT Gateway 선택</span>
+              <select value={sel} onChange={(e) => setSel(e.target.value ? Number(e.target.value) : "")} disabled={busy}>
+                <option value="">Gateway 를 선택하세요</option>
+                {gateways.map((g) => (
+                  <option key={g.id} value={g.id}>{g.name} · {g.data.gateway_id} · {g.data.status || ""}</option>
+                ))}
+              </select>
+            </label>
+            <button type="button" className="btn" disabled={busy || sel === ""}
+              onClick={() => typeof sel === "number" && bind(sel)}>{progress ? "연결 중…" : "연결"}</button>
+          </div>
+        )}
+        {!creating ? (
+          <div className="actions left">
+            <button type="button" className="btn ghost" disabled={busy} onClick={() => setCreating(true)}>새 Gateway 생성</button>
+            <button type="button" className="btn ghost" disabled={busy}
+              onClick={() => {
+                onBusy(true); onErr(""); onMsg("");
+                setProgress(d.approval_gateway_id
+                  ? `Gateway "${d.approval_gateway_name || d.approval_gateway_id}" 에서 target 제거 중…`
+                  : "승인 프로세스 해제 중…");
+                api.setRuntimeApproval(item.id, { approval_required: false })
+                  .then((r) => { onUpdated(r); onMsg("승인 프로세스를 끄고 Gateway target 을 제거했습니다."); })
+                  .catch((e) => onErr(e.message))
+                  .finally(() => { setProgress(""); onBusy(false); });
+              }}>승인 불필요로 바꾸기</button>
+          </div>
+        ) : (
+          <form className="form" onSubmit={createGw} style={{ marginTop: ".4rem" }}>
+            <Field label="Gateway 이름" hint="영문으로 시작, 영문·숫자·_·- (최대 48자)">
+              <input required value={gwName} maxLength={48} onChange={(e) => setGwName(e.target.value)} placeholder="gw-my-team-jwt" disabled={busy} />
+            </Field>
+            <Field label="설명 (선택)">
+              <input value={gwDesc} maxLength={200} onChange={(e) => setGwDesc(e.target.value)} placeholder="팀용 JWT Gateway" disabled={busy} />
+            </Field>
+            <p className="hint">Cognito JWT 인증 + 포털 인터셉터로 만들어, 사용 승인된 사용자만 호출할 수 있습니다.</p>
+            <div className="actions left">
+              <button type="submit" className="btn" disabled={busy || !GW_NAME_RE.test(gwName)}>{progress ? "진행 중…" : "생성"}</button>
+              <button type="button" className="btn ghost" disabled={busy} onClick={() => setCreating(false)}>취소</button>
+            </div>
+          </form>
+        )}
+      </>)}
+    </div>
+  );
+}
 
 export function CreateModal({ kind, onClose, onDone }: { kind: Kind; onClose: () => void; onDone: (r: Item) => void }) {
   const [f, setF] = useState<Record<string, any>>({ headers: [], source_type: "git", agent_type: "custom" });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [file, setFile] = useState<File | null>(null);
   const set = (k: string, v: any) => setF((p) => ({ ...p, [k]: v }));
   const path = { prompt: "prompts", mcp: "mcp", agent: "agents", skill: "skills" }[kind];
 
   async function submit(e: React.FormEvent) {
     e.preventDefault(); setBusy(true); setErr("");
     try {
+      if (kind === "skill" && f.source_type === "s3" && f.s3_mode !== "uri") {
+        if (!file) throw new Error("업로드할 skill zip 파일을 선택하세요");
+        onDone(await api.uploadSkill(f.name ?? "", file, f.description ?? ""));
+        setBusy(false);
+        return;
+      }
       const body: any = { ...f };
+      delete body.s3_mode;
       if (kind === "mcp") body.headers = (f.headers as any[]).filter((h) => h.key.trim());
       onDone(await api.create(path, body));
     } catch (x: any) { setErr(x.message); }
@@ -103,11 +244,21 @@ export function CreateModal({ kind, onClose, onDone }: { kind: Kind; onClose: ()
             </div>
             <Field label="Credential provider ARN (비공개 repo 필수)"><input value={f.credential_provider_arn ?? ""} onChange={(e) => set("credential_provider_arn", e.target.value)} /></Field>
           </>) : (<>
+            <div className="seg wide" role="group" aria-label="S3 등록 방식">
+              <button type="button" aria-pressed={f.s3_mode !== "uri"} className={f.s3_mode !== "uri" ? "on" : ""} onClick={() => set("s3_mode", "upload")}>zip 업로드</button>
+              <button type="button" aria-pressed={f.s3_mode === "uri"} className={f.s3_mode === "uri" ? "on" : ""} onClick={() => set("s3_mode", "uri")}>S3 URI 입력</button>
+            </div>
+            {f.s3_mode !== "uri" ? (
+              <Field label="Skill zip 파일" hint="SKILL.md 가 들어 있는 zip (최대 50MB). 등록하면 포털 저장소 S3 의 skills/{user-id}/{이름}/skill.zip 에 올라갑니다.">
+                <input required type="file" accept=".zip,application/zip" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+              </Field>
+            ) : (<>
             <Field label="S3 URI"><input required placeholder="s3://bucket/path/skill.zip" value={f.s3_uri ?? ""} onChange={(e) => set("s3_uri", e.target.value)} /></Field>
             <Field label="Object version (선택)"><input value={f.object_version ?? ""} onChange={(e) => set("object_version", e.target.value)} /></Field>
+            </>)}
           </>)}
           <Field label="설명" hint="비워 두면 Git/S3 정보가 기본 설명으로 들어갑니다. 등록 후에도 수정할 수 있습니다.">
-            <textarea rows={3} value={f.description ?? ""} placeholder={f.source_type === "git" ? `GIT skill: ${f.git_url ?? ""}` : `S3 skill: ${f.s3_uri ?? ""}`} onChange={(e) => set("description", e.target.value)} />
+            <textarea rows={3} value={f.description ?? ""} placeholder={f.source_type === "git" ? `GIT skill: ${f.git_url ?? ""}` : f.s3_mode !== "uri" ? "S3 skill: 업로드한 zip 의 S3 주소" : `S3 skill: ${f.s3_uri ?? ""}`} onChange={(e) => set("description", e.target.value)} />
           </Field>
         </>)}
 
@@ -139,6 +290,7 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
   const [pickReviewer, setPickReviewer] = useState(false);
   const [usage, setUsage] = useState<api.UsageState | null>(null);
   const d = item.data;
+  const isRuntimeMcp = item.kind === "mcp" && d.kind === "runtime";
 
   // 생성 직후의 CREATING/UPDATING 은 동기화 전까지 갱신되지 않는다 → 열 때 한 번만 AWS 상태를 확인한다(폴링 없음)
   useEffect(() => {
@@ -153,6 +305,22 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
     setBusy(false);
   }
   const upd = (i: Item) => { onChanged(i); setDesc(i.description); };
+
+  // runtime MCP 를 처음 열면 승인 프로세스 필요 여부를 묻는다(아직 설정하지 않은 경우만)
+  useEffect(() => {
+    if (!isRuntimeMcp || !item.can_edit || d.approval_required !== undefined) return;
+    setAsk({
+      title: "승인 프로세스가 필요한가요?",
+      lines: [],
+      confirmLabel: "예", cancelLabel: "아니오",
+      onConfirm: () => run(() => api.setRuntimeApproval(item.id, { approval_required: true }), (i) => {
+        upd(i); setMsg("승인 프로세스가 필요합니다. JWT Gateway 를 선택하거나 새로 만드세요.");
+      }),
+      onCancel: () => run(() => api.setRuntimeApproval(item.id, { approval_required: false }), (i) => {
+        upd(i); setMsg("승인 프로세스 없이 사용합니다.");
+      }),
+    });
+  }, [item.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const needsUsage = item.kind === "mcp" || item.kind === "agent";
   const kindLabel = item.kind === "agent" ? "Agent" : "MCP";
   const loadUsage = () => { if (needsUsage) api.myUsage(item.id, item.kind as api.UsageKind).then(setUsage).catch(() => setUsage(null)); };
@@ -188,7 +356,10 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
   return (
     <Modal title={item.name} onClose={onClose} wide actions={usageAction}>
       <div className="detail">
-        <p className="by">{item.kind.toUpperCase()} · By {item.owner}{item.source === "aws" && item.owner !== "aws" && <span className="badge">AWS 동기화</span>}</p>
+        <p className="by">{item.kind.toUpperCase()} · By {item.owner}
+          {item.source === "aws" && item.owner !== "aws" && <span className="badge">AWS 동기화</span>}
+          {isRuntimeMcp && d.approval_required && <span className="badge st-PENDING_APPROVAL">승인 필요</span>}
+        </p>
 
         <h3>설명</h3>
         {item.can_edit ? (<div className="row">
@@ -246,9 +417,15 @@ export function DetailModal({ item, user, onClose, onChanged, onDeleted }: {
             <div className="wide-row"><dt>ARN</dt><dd className="mono sm arn">{d.arn}</dd></div>
             <div className="wide-row"><dt>MCP endpoint</dt><dd className="mono sm arn">{d.endpoint || "-"}</dd></div>
           </dl>
-          {(d.auth !== "JWT" || (usage?.can_use ?? true)) && (<>
-            <h3>테스트 <span className="hint">harness agent</span></h3>
-            <McpTest key={item.id} item={item} /></>)}
+          {d.approval_required !== undefined && (
+            <RuntimeApprovalPanel item={item} canEdit={item.can_edit} busy={busy}
+              onBusy={setBusy} onUpdated={upd} onMsg={setMsg} onErr={setErr} />)}
+          {/* 승인 설정이 끝난 runtime 은 Claude/Codex/Agent 사용 방법을 고를 수 있다(승인 필요→Gateway, 불필요→직접 MCP). */}
+          {d.approval_required !== undefined && <McpHowTo key={`howto:${item.id}:${d.approval_required}:${d.approval_gateway_id || ""}`} item={item} />}
+          {/* 승인 필요: Gateway 미연결이어도 테스트 UI는 보여 주고 보내기만 막는다. 승인 불필요·IAM 은 기존처럼. */}
+          {(d.approval_required || d.auth !== "JWT" || (usage?.can_use ?? true)) && (<>
+            <h3>테스트 <span className="hint">harness agent{d.approval_required && d.approval_gateway_id ? " · JWT Gateway" : d.approval_required === false ? " · 직접 호출" : ""}</span></h3>
+            <McpTest key={`${item.id}:${d.approval_required}:${d.approval_gateway_id || ""}`} item={item} /></>)}
         </>)}
 
         {item.kind === "mcp" && d.kind !== "gateway" && d.kind !== "runtime" && (usage?.can_use ?? true) && (<>

@@ -319,6 +319,8 @@ python installer.py --notifications-only   # 승인 요청 메일 알림만
 python installer.py --harness-only         # MCP 테스트용 harness agent `ai_portal` 만
 python installer.py --gateway-only         # AgentCore Gateway `gw-ai-portal-jwt`·`gw-ai-portal-iam`·`gw-websearch-jwt`·`gw-websearch-iam`(+ target, interceptor Lambda) 만
 python installer.py --table-only           # DynamoDB 저장소 테이블만
+python installer.py --storage-only         # Skill zip·로그용 S3 버킷만
+python installer.py --logs-only            # MCP 요청 로그 파이프라인(Firehose·Glue·Athena)만
 python installer.py --domain-only          # 커스텀 도메인(인증서·CloudFront 별칭·DNS)만
 python installer.py                        # 전체 (VPC·ALB·ECR·ECS Fargate·CloudFront)
 python installer.py --skip-docker-build    # 이미지 재빌드 없이
@@ -410,6 +412,32 @@ Cognito 앱 클라이언트 ID(공개 값)는 `/api/config` 의 `cognitoClientId
 
 토큰을 직접 받아 `Authorization: Bearer` 헤더로 쓰는 방법(`./add_user.sh <email> --token`, 또는 API `GET /api/mcp/{id}/token`)도 여전히 가능합니다. 자세한 내용은 «AWS 리소스» 의 «MCP 접속 토큰» 항목을 보세요.
 
+## 요청 로그 (관리자 «로그 확인»)
+MCP 호출 기록을 S3 에 모아 두고 관리자가 Athena 로 조회·다운로드합니다. **MCP 만 적용되어 있고 Agent 는 추후 적용입니다**(화면에는 «추후 적용» 이 표시되고 `kind=agent` 파티션만 예약).
+
+```
+Gateway ─ interceptor Lambda ─ put_record ─▶ Kinesis Data Firehose ─(5분/64MB 버퍼, gzip JSON Lines)─▶
+  s3://storage-for-ai-portal-<account>-<region>/logs/kind=mcp/target=<gateway-id>/dt=YYYY-MM-DD/*.json.gz
+                                                                  ▲
+관리자 화면 «관리 → 로그 확인» ─ FastAPI ─ Athena(워크그룹 ai-portal-logs) ─ Glue 테이블 ai_portal.request_logs (파티션 프로젝션)
+```
+- **수집 (`lambda-interceptor/lambda_function.py`)**: interceptor 가 요청마다 **REQUEST 와 RESPONSE 를 각각 한 행**으로 Firehose 에 보냅니다. 전송 실패·타임아웃(연결 2초/읽기 3초)은 요청을 막지 않고 경고만 남깁니다. 허용된 요청과 **차단된 요청(`blocked`, `block_reason`)** 을 모두 기록합니다.
+- **한 호출 = 두 행**: Athena 에서 `rpc_id`(JSON-RPC id) + `req_hash`(method·id·tool 이름의 해시)로 묶고 응답 시각에서 지연 시간을 계산합니다. `rpc_id` 는 클라이언트마다 1, 2, 3… 으로 시작해 겹치므로 `rpc_id` 만으로는 묶지 않습니다. 차단된 요청은 응답이 없어 조인하지 않습니다.
+- **경로**: Hive 스타일 `kind=…/target=…/dt=…` 파티션이라 **파티션 프로젝션**을 쓰며 크롤러·`MSCK REPAIR` 가 필요 없습니다. 조회는 선택한 MCP(`target`)와 기간(`dt`)의 폴더만 읽습니다. **tool 이름은 폴더가 아니라 컬럼**입니다(tool 별 폴더는 파티션이 과도하게 늘어납니다). `target` 은 gateway ID(IAM 호출은 Host 헤더가 없어 리전의 IAM gateway ID 를 `IAM_GATEWAY_ID` 환경 변수로 압니다).
+- **컬럼**: `ts, point, rpc_id, req_hash, gateway, method, mcp_target, tool, caller, user_email, auth, arguments, blocked, block_reason, status, is_error, error_message, resp_bytes`. 요청자는 JWT 호출이면 Cognito 이메일(`user_email`), IAM 호출이면 호출자 ARN(`caller`)입니다.
+- **저장 범위**: 요청의 **tool 인자 값은 저장**합니다(`arguments`, 4000자 제한). 키 이름이 `secret|token|authorization|password|api_key…` 인 값과, 값이 JWT·AWS 액세스 키·`Bearer` 토큰 모양이면 `<redacted>` 로 가립니다. **응답 본문·헤더·서명은 저장하지 않으며** 응답은 상태·오류 여부·크기만 남습니다. 인자에 개인정보가 들어 있을 수 있으므로 로그 접근은 관리자로 한정합니다.
+- **보존 90일**: `logs/` 는 S3 수명 주기로 90일 뒤 만료되고(`LOG_RETENTION_DAYS`), Athena 결과(`athena-results/`)는 7일 뒤 만료됩니다. 조회 기간도 최대 90일입니다. `skills/` 는 수명 주기 대상이 아닙니다.
+- **Athena 비용 제어**: 전용 워크그룹 `ai-portal-logs` 에 쿼리당 스캔 상한 10GB(`BytesScannedCutoffPerQuery`)와 결과 위치를 강제합니다. 사용자 입력(요청자·tool)은 SQL 문자열이 아니라 **실행 파라미터(`?`)** 로 넘기고, target 은 포털에 등록된 gateway ID 인지 확인한 뒤 쓰므로 SQL injection 이 불가능합니다.
+- **화면 (관리 → 로그 확인)**: MCP/Agent 선택 → MCP(Gateway) 선택 → 기간·요청자·tool·«차단/오류만» → 조회. Athena 는 느리므로 **조회를 시작하고 1.5초마다 상태를 확인**해 끝나면 표(최대 500건)를 보여 줍니다. 상단에 차단·오류 건수와 요청자별 상위 5명이 나옵니다. 행을 누르면 요청 내용 전체가 펼쳐집니다. 결과는 **CSV·JSON 으로 다운로드**(최대 1만 건)할 수 있고 CSV 는 수식 주입(`=`,`+`,`-`,`@` 시작)을 막기 위해 `'` 를 붙이며 Excel 에서 한글이 깨지지 않도록 BOM 을 붙입니다. 누가 로그를 조회·다운로드했는지는 서버 로그에 남깁니다.
+- **API (관리자 전용)**: `GET /api/admin/logs/targets?kind=` · `POST /api/admin/logs/query` · `GET /api/admin/logs/query/{id}` · `…/results` · `…/download?format=csv|json`.
+- **설치**: `python installer.py`(전체) 또는 `python installer.py --logs-only`(파이프라인만 만들고 interceptor 에 반영). Firehose `firehose-ai-portal-logs`, 역할 `role-firehose-for-ai-portal-<region>`, Glue DB `ai_portal`·테이블 `request_logs`, Athena 워크그룹을 만들고 interceptor 역할에 `firehose:PutRecord`, ECS task role 에 Athena·Glue·`logs/`·`athena-results/` 권한(워크그룹·DB·테이블 한정)을 줍니다. `uninstaller.py` 가 함께 지웁니다(`--keep-table` 이면 로그도 남김).
+- **알아둘 점**
+  - 기록은 **5분 또는 64MB 단위**로 S3 에 묶이므로 방금 한 호출은 최대 약 5분 뒤에 조회됩니다.
+  - **Gateway 를 거치지 않는 MCP**(포털에 URL 로만 등록한 원격 MCP 등)는 기록되지 않습니다. 화면의 MCP 목록에는 Gateway 로 연결된 항목만 나옵니다.
+  - RESPONSE 이벤트에는 호출자 정보가 없을 수 있어, 같은 gateway 에서 같은 id·method·tool 의 호출이 거의 동시에 겹치면 응답(결과·지연 시간)이 서로 바뀔 수 있습니다. 요청자·요청 내용은 REQUEST 행에서 오므로 영향이 없습니다.
+  - Firehose 는 요청 로그 전용으로 us-west-2 한 곳에 있고 us-east-1 interceptor 도 같은 stream 으로 보냅니다.
+  - 포털의 MCP 테스트는 harness 가 Gateway 를 호출하므로 IAM 호출로 기록되며 `caller` 가 harness 실행 역할로 나옵니다(포털 사용자 이메일 아님).
+
 ## API 요약
 | | |
 |---|---|
@@ -434,6 +462,7 @@ Cognito 앱 클라이언트 ID(공개 값)는 `/api/config` 의 `cognitoClientId
 | `GET /api/admin/dashboard` | 접속 통계 · Registry type/상태별 현황 · 사용자별 등록 (관리자 전용) |
 | `GET /api/registry` | 연결된 Registry 정보(읽기 전용) |
 | `GET/PUT /api/policy` | 승인 자동화(Auto-approval·Auto-review) 조회 · 변경(관리자만) |
+| `GET /api/admin/logs/targets` · `POST /api/admin/logs/query` · `GET …/query/{id}[/results\|/download]` | MCP 요청 로그 조회(Athena)·다운로드 (관리자 전용) |
 | `GET /api/admin/ping` | 관리자 전용 골격 |
 
 ## 알아둘 제약
@@ -468,11 +497,13 @@ Cognito 앱 클라이언트 ID(공개 값)는 `/api/config` 의 `cognitoClientId
 - **Agent 사용 승인**(MCP 와 같은 신청·승인·취소)과 Agent **사용 방법** 가이드(IAM/JWT harness)
 - **에이전트 생성**(Bedrock 직접 호출, IAM Gateway MCP·Skill 연결)
 - 관리자 대시보드(접속 통계·Registry 등록 현황·사용자 표)
+- **MCP 요청 로그**(Firehose → S3 → Athena)와 관리자 «로그 확인» 화면(조회·CSV/JSON 다운로드)
 - DynamoDB 영구 저장소(삭제 보호·PITR)와 커스텀 도메인
 
 ### 미구현
 - JWT 인증 Gateway MCP 를 에이전트에 연결(토큰 전달/교환 설계 필요), 소유자 사용 취소 정책
 - Gateway target(도구) 목록 보기
 - Registry **hybrid 검색**(`SearchRegistryRecords`) 과 Registry 기준 목록
-- 이벤트·감사 로그 패널 — 지금은 접속 기록(대시보드)과 인터셉터의 CloudWatch Logs 만 있고, 승인·삭제 같은 변경 이력을 한곳에서 보는 화면은 없음
+- **Agent 요청 로그** — MCP 는 수집·조회가 되지만 Agent(harness/runtime) 호출은 아직 기록하지 않음(`kind=agent` 파티션만 예약). 포털(`agent_test.agent_events`)이 Firehose 로 보내는 방식으로 추가 예정
+- 승인·삭제 같은 변경 이력을 한곳에서 보는 감사 화면 — 지금은 접속 기록(대시보드)과 MCP 요청 로그만 있음
 - 무중단 배포(태스크 2개 이상, `minimumHealthyPercent` 상향)

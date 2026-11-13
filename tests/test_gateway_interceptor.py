@@ -291,3 +291,65 @@ def test_new_approval_is_seen_without_waiting_for_a_cache(lam, aws):
     assert not blocked(lam.handler(jreq(jwt()), None))
     fake.approved = []                                                               # 취소
     assert blocked(lam.handler(jreq(jwt()), None))
+
+
+# ── 요청 로그(Firehose) ──
+class _FH:
+    def __init__(self): self.rows = []
+    def put_record(self, DeliveryStreamName, Record): self.rows.append((DeliveryStreamName, json.loads(Record["Data"])))
+
+
+@pytest.fixture
+def fh(lam, monkeypatch):
+    f = _FH()
+    monkeypatch.setattr(lam, "LOG_STREAM", "stream-x")
+    monkeypatch.setattr(lam, "IAM_GATEWAY_ID", "gw-iam-1")
+    lam._clients["firehose"] = f
+    return f
+
+
+def test_request_and_response_are_two_rows_with_the_same_join_key(lam, fh):
+    lam.handler(req(), None)
+    rs = resp(); rs["mcp"]["gatewayRequest"]["body"] = req()["mcp"]["gatewayRequest"]["body"]
+    lam.handler(rs, None)
+    (n1, q), (n2, r) = fh.rows
+    assert n1 == n2 == "stream-x" and q["point"] == "REQUEST" and r["point"] == "RESPONSE"
+    assert q["rpc_id"] == r["rpc_id"] == "1" and q["req_hash"] == r["req_hash"] != ""
+    assert q["kind"] == "mcp" and q["target"] == "gw-iam-1" and q["dt"] == q["ts"][:10]
+    assert q["tool"] == "search" and q["mcp_target"] == "target-ai-portal" and q["blocked"] is False
+    assert q["caller"] == "arn:aws:iam::111122223333:user/alice" and q["arguments"] == '{"q": "TOP-SECRET-VALUE"}'
+    assert r["status"] == 200 and r["is_error"] is False and r["resp_bytes"] > 0
+
+
+def test_log_row_never_has_headers_or_response_body_and_scrubs_credentials(lam, fh):
+    body = {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "t___x", "arguments": {
+        "api_key": "K123", "note": "use Bearer abcdefghijklmnop1234 and AKIAABCDEFGHIJKLMNOP", "ok": "hello"}}}
+    lam.handler(req(body=body), None); lam.handler(resp(), None)
+    text = json.dumps(fh.rows)
+    assert "SECRET-SIG" not in text and "SECRET-RESULT" not in text and "K123" not in text
+    assert "abcdefghijklmnop1234" not in text and "AKIAABCDEFGHIJKLMNOP" not in text
+    assert json.loads(fh.rows[0][1]["arguments"])["ok"] == "hello"        # 나머지 값은 그대로 남는다
+
+
+def test_blocked_request_is_logged_with_reason_and_email(lam, fh, monkeypatch):
+    monkeypatch.setattr(lam, "_email", lambda claims: "bad@x.com")
+    out = lam.handler(jreq(jwt(), method="tools/call", name="s___t", arguments={"a": 1}), None)
+    assert blocked(out)
+    row = fh.rows[0][1]
+    assert row["blocked"] is True and row["user_email"] == "bad@x.com" and row["auth"] == "jwt" and row["block_reason"]
+    assert row["target"] == GW_ID                                          # Host 헤더에서
+    assert "SIGNATURE-DO-NOT-LOG" not in json.dumps(row)
+
+
+def test_log_failure_never_blocks_the_request(lam, monkeypatch):
+    class Boom:
+        def put_record(self, **kw): raise RuntimeError("firehose down")
+    monkeypatch.setattr(lam, "LOG_STREAM", "s"); lam._clients["firehose"] = Boom()
+    ev = req()
+    assert lam.handler(ev, None)["mcp"]["transformedGatewayRequest"]["body"] == ev["mcp"]["gatewayRequest"]["body"]
+    assert lam.handler(resp(), None)["interceptorOutputVersion"] == "1.0"
+
+
+def test_no_stream_means_no_logging_and_target_is_path_safe(lam):
+    assert lam.LOG_STREAM == "" and lam.handler(req(), None)["interceptorOutputVersion"] == "1.0"
+    assert lam._safe_part("../../x/y") == ".._.._x_y" and lam._safe_part("") == "unknown"

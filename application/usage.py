@@ -33,19 +33,54 @@ def usable_since(item: dict, user: auth.User) -> tuple[bool, float | None]:
 
 
 def _gateway_id(item: dict) -> str:
+    """인터셉터가 보는 Gateway ID. Gateway 항목 자체이거나, 승인 프로세스에 묶인 runtime 의 JWT Gateway."""
     d = item.get("data") or {}
-    return d.get("gateway_id", "") if d.get("kind") == "gateway" else ""
+    if d.get("kind") == "gateway":
+        return d.get("gateway_id", "")
+    if d.get("kind") == "runtime" and d.get("approval_required") and d.get("approval_gateway_id"):
+        return d.get("approval_gateway_id", "")
+    return ""
+
+
+def _gateway_catalog_item(gateway_id: str) -> dict | None:
+    """gateway_id 에 해당하는 포털 MCP(Gateway) 항목. 인터셉터는 이 항목의 approved_users 를 본다."""
+    if not gateway_id:
+        return None
+    for it in db.list_items("mcp"):
+        d = it.get("data") or {}
+        if d.get("kind") == "gateway" and d.get("gateway_id") == gateway_id:
+            return it
+    return None
 
 
 def sync_approved_users(item: dict) -> None:
     """Gateway MCP 항목(data.approved_users)에 사용이 승인된 사용자 이메일 목록을 기록한다.
-    인터셉터 Lambda 가 요청마다 이 항목 하나만 읽어 판단한다. 승인 기록(USAGE#)에서 매번 다시 계산하므로 둘이 어긋나지 않는다."""
-    if not _gateway_id(item):
+    인터셉터 Lambda 가 요청마다 이 항목 하나만 읽어 판단한다. 승인 기록(USAGE#)에서 매번 다시 계산하므로 둘이 어긋나지 않는다.
+
+    runtime 이 JWT Gateway 에 묶여 있으면(승인 프로세스) Gateway 항목·해당 Gateway 에 묶인 모든 runtime 의
+    승인자를 합쳐 Gateway 의 approved_users 에 기록한다(한 runtime 이 다른 승인을 지우지 않도록).
+    """
+    gid = _gateway_id(item)
+    if not gid:
         return
-    users = sorted(r["email"] for r in db.list_usage_requests(status="APPROVED", item_id=item["id"]))
-    cur = db.get_item(item["id"])
-    if cur is not None and (cur["data"] or {}).get("approved_users") != users:
-        db.update_item(item["id"], data={**cur["data"], "approved_users": users})
+    gw = _gateway_catalog_item(gid)
+    emails: set[str] = set()
+    if gw:
+        emails.update(r["email"] for r in db.list_usage_requests(status="APPROVED", item_id=gw["id"]))
+    for it in db.list_items("mcp"):
+        d = it.get("data") or {}
+        if d.get("kind") == "runtime" and d.get("approval_required") and d.get("approval_gateway_id") == gid:
+            emails.update(r["email"] for r in db.list_usage_requests(status="APPROVED", item_id=it["id"]))
+    users = sorted(emails)
+    if gw is not None and (gw.get("data") or {}).get("approved_users") != users:
+        db.update_item(gw["id"], data={**gw["data"], "approved_users": users})
+    # runtime 상세에서도 볼 수 있게 이 항목 자신의 승인 목록만 따로 남긴다
+    d = item.get("data") or {}
+    if d.get("kind") == "runtime":
+        mine = sorted(r["email"] for r in db.list_usage_requests(status="APPROVED", item_id=item["id"]))
+        cur = db.get_item(item["id"])
+        if cur is not None and (cur["data"] or {}).get("approved_users") != mine:
+            db.update_item(cur["id"], data={**cur["data"], "approved_users": mine})
 
 
 def sync_group(item: dict, email: str, approved: bool) -> str:
@@ -76,12 +111,17 @@ def can_use(item: dict, user: auth.User) -> bool:
 
 def test_without_approval(item: dict) -> bool:
     """사용 승인 없이 포털에서 테스트해 볼 수 있는가. IAM 인증은 포털(harness)의 IAM 역할로 호출하므로 승인이 필요 없다.
-    JWT 는 접속한 사용자의 Cognito 토큰으로, 직접 등록한 MCP 는 사용자가 넣은 헤더로 호출하므로 승인 뒤에만 시험할 수 있다."""
+    JWT 는 접속한 사용자의 Cognito 토큰으로, 직접 등록한 MCP 는 사용자가 넣은 헤더로 호출하므로 승인 뒤에만 시험할 수 있다.
+    runtime 이 승인 프로세스(JWT Gateway)에 묶여 있으면 Gateway 인터셉터가 승인을 보므로 승인 뒤에만 시험한다."""
     d = item.get("data") or {}
     if item["kind"] == "agent":
         return d.get("auth") != "JWT"
-    return item["kind"] == "mcp" and ((d.get("kind") == "gateway" and d.get("authorizer") == "AWS_IAM")
-                                      or (d.get("kind") == "runtime" and d.get("auth") != "JWT"))
+    if item["kind"] != "mcp":
+        return True
+    if d.get("kind") == "runtime" and d.get("approval_required"):
+        return False
+    return ((d.get("kind") == "gateway" and d.get("authorizer") == "AWS_IAM")
+            or (d.get("kind") == "runtime" and d.get("auth") != "JWT"))
 
 
 def require_test(item: dict, user: auth.User) -> None:

@@ -66,10 +66,25 @@ logs = session.client("logs")
 secretsmanager = session.client("secretsmanager")
 cloudfront = session.client("cloudfront")
 events = session.client("events")
+s3 = session.client("s3")
+firehose = session.client("firehose")
+glue = session.client("glue")
+athena = session.client("athena")
 agentcore = session.client("bedrock-agentcore-control")   # harness / gateway / runtime
 agent_registry = session.client("agent-registry-control")  # Registry (구 bedrock-agentcore Registry 네임스페이스는 2026-10-30 종료)
 
 TAGS = [{"Key": "Project", "Value": project_name}]
+BUCKET_NAME = f"storage-for-{project_name}-{account_id}-{region}"    # agentic-work 와 같은 규칙
+
+
+# ── 요청 로그(MCP): interceptor → Firehose → S3(logs/) → Athena ──
+LOG_RETENTION_DAYS = 90
+LOG_STREAM = f"firehose-{project_name}-logs"
+LOG_FIREHOSE_ROLE = f"role-firehose-for-{project_name}-{region}"
+LOG_GLUE_DB = project_name.replace("-", "_")                       # ai_portal
+LOG_GLUE_TABLE = "request_logs"
+LOG_ATHENA_WORKGROUP = f"{project_name}-logs"
+LOG_ATHENA_SCAN_LIMIT = 10 * 1024 ** 3                              # 쿼리 하나가 스캔할 수 있는 상한(10GB). 넘으면 취소된다
 
 
 # ── helpers ─────────────────────────────────────────────────────────
@@ -296,6 +311,10 @@ def create_harness_role() -> str:
             # MCP 테스트: harness 가 IAM(SigV4)으로 Gateway 를 호출한다. 이 계정의 Gateway 로 한정.
             {"Sid": "InvokeGateways", "Effect": "Allow", "Action": ["bedrock-agentcore:InvokeGateway"],
              "Resource": [f"arn:aws:bedrock-agentcore:*:{account_id}:gateway/*"]},
+            # Skill 테스트: harness 가 업로드된 skill zip 을 S3 에서 가져온다
+            {"Sid": "ReadSkills", "Effect": "Allow", "Action": ["s3:GetObject", "s3:GetObjectVersion"],
+             "Resource": [f"arn:aws:s3:::{BUCKET_NAME}/skills/*"]},
+            {"Sid": "ListSkills", "Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": [f"arn:aws:s3:::{BUCKET_NAME}"]},
             # harness 는 기본으로 관리형 메모리(memory/<harness>-…)를 만들고 대화 이력을 읽고 쓴다.
             {"Sid": "HarnessMemory", "Effect": "Allow", "Action": [
                 "bedrock-agentcore:ListEvents", "bedrock-agentcore:CreateEvent", "bedrock-agentcore:GetEvent",
@@ -405,10 +424,18 @@ def ensure_interceptor_lambda(rgn: str = region) -> str:
     zipped = _package_lambda_zip(ROOT / "lambda-interceptor" / "lambda_function.py")
     cfg = {"Timeout": 30, "MemorySize": 128}                  # gateway 호출 경로에 있다. 콜드스타트(boto3 로딩+조회)가 몇 초 걸려 여유를 둔다
     cc = load_config()
+    env_vars: Dict[str, str] = {}
+    if cc.get("log_stream"):                  # 요청 로그: Firehose(us-west-2 한 곳)로 보낸다. 다른 리전 Lambda 도 같은 stream 으로 보낸다
+        env_vars.update(LOG_STREAM=cc["log_stream"], LOG_REGION=region)
+        iam.put_role_policy(RoleName=interceptor_role_name(rgn), PolicyName="put-request-logs", PolicyDocument=json.dumps({
+            "Version": "2012-10-17", "Statement": [{"Sid": "PutRequestLogs", "Effect": "Allow", "Action": ["firehose:PutRecord"],
+                                                    "Resource": [cc["log_stream_arn"]]}]}))
+    iam_gw = cc.get("gateway_iam_id") if rgn == region else cc.get(f"iam_gateway_id_{rgn}")
+    if iam_gw:                                # IAM 호출은 Host 헤더가 없어 어느 gateway 인지 알 수 없다 → 리전당 하나뿐인 IAM gateway 로 안다
+        env_vars["IAM_GATEWAY_ID"] = iam_gw
     pool_id, pool_region = cc.get("cognito_user_pool_id", ""), cc.get("cognito_region", COGNITO_REGION)
     if pool_id:     # 인터셉터는 토큰의 사용자를 포털의 사용 승인 기록(DynamoDB)에서 요청마다 확인한다(Cognito 는 sub→이메일 조회에만 쓴다)
-        cfg["Environment"] = {"Variables": {"COGNITO_USER_POOL_ID": pool_id, "COGNITO_REGION": pool_region,
-                                            "DDB_TABLE": DDB_TABLE, "DDB_REGION": region}}
+        env_vars.update(COGNITO_USER_POOL_ID=pool_id, COGNITO_REGION=pool_region, DDB_TABLE=DDB_TABLE, DDB_REGION=region)
         iam.put_role_policy(RoleName=interceptor_role_name(rgn), PolicyName="read-approvals", PolicyDocument=json.dumps({
             "Version": "2012-10-17", "Statement": [
                 {"Sid": "ResolveUserEmail", "Effect": "Allow", "Action": ["cognito-idp:AdminGetUser"],
@@ -419,6 +446,8 @@ def ensure_interceptor_lambda(rgn: str = region) -> str:
             iam.delete_role_policy(RoleName=interceptor_role_name(rgn), PolicyName="read-cognito-groups")
         except ClientError:
             pass
+    if env_vars:
+        cfg["Environment"] = {"Variables": env_vars}
     try:
         lam.get_function(FunctionName=INTERCEPTOR_FUNCTION)
         lam.update_function_code(FunctionName=INTERCEPTOR_FUNCTION, ZipFile=zipped)
@@ -452,7 +481,13 @@ def ensure_gateway_role(interceptor_arn: str, rgn: str = region, gw_name: str = 
         arn = iam.create_role(RoleName=gateway_role_name(rgn), AssumeRolePolicyDocument=json.dumps(trust), Tags=TAGS,
                               Description=f"Service role of gateway {gw_name}")["Role"]["Arn"]
         logger.info("Created role %s", gateway_role_name(rgn))
-    stmts = [{"Sid": "InvokeInterceptor", "Effect": "Allow", "Action": "lambda:InvokeFunction", "Resource": [interceptor_arn]}]
+    stmts = [
+        {"Sid": "InvokeInterceptor", "Effect": "Allow", "Action": "lambda:InvokeFunction", "Resource": [interceptor_arn]},
+        # runtime MCP target(GATEWAY_IAM_ROLE) 호출 — 포털에서 runtime 을 Gateway 에 붙일 때 필요
+        {"Sid": "InvokeAgentRuntime", "Effect": "Allow",
+         "Action": ["bedrock-agentcore:InvokeAgentRuntime", "bedrock-agentcore:InvokeAgentRuntimeForUser"],
+         "Resource": [f"arn:aws:bedrock-agentcore:{rgn}:{account_id}:runtime/*"]},
+    ]
     if websearch:                                  # web-search connector target 이 쓰는 AWS 관리형 도구
         stmts.append({"Sid": "InvokeWebSearchTool", "Effect": "Allow", "Action": ["bedrock-agentcore:InvokeWebSearch"],
                       "Resource": [f"arn:aws:bedrock-agentcore:{rgn}:aws:tool/web-search.v1"]})
@@ -618,6 +653,11 @@ def ensure_gateway(rgn: str = region, websearch: bool = False, cognito_jwt: bool
 
     info = {"id": gid, "arn": cur["gatewayArn"], "url": cur.get("gatewayUrl", ""), "region": rgn,
             "name": gw_name, "target_id": tid, "interceptor_lambda_arn": interceptor_arn}
+    if not cognito_jwt:                                # IAM gateway 의 id 를 interceptor 가 알아야 로그의 target 을 채운다(리전당 IAM gateway 하나)
+        key = "gateway_iam_id" if rgn == region else f"iam_gateway_id_{rgn}"
+        if load_config().get(key) != gid:
+            save_config(**{key: gid})
+            ensure_interceptor_lambda(rgn)
     if config_prefix:                                  # 포털 리전 gateway 는 config 에 남긴다
         pf = config_prefix
         save_config(**{f"{pf}_id": gid, f"{pf}_arn": cur["gatewayArn"], f"{pf}_url": cur.get("gatewayUrl", ""),
@@ -842,6 +882,160 @@ def ensure_table() -> str:
 
 
 # ── 2. Secrets ──────────────────────────────────────────────────────
+def ensure_storage_bucket() -> str:
+    """Skill zip 저장소. skills/{user-id}/{skill 이름}/skill.zip 로 올린다. agentic-work 의 버킷 설정(공개 차단·CORS·버저닝)을 따른다."""
+    try:
+        s3.head_bucket(Bucket=BUCKET_NAME)
+    except ClientError as e:
+        if e.response["Error"]["Code"] not in ("404", "NoSuchBucket", "NotFound"):
+            raise
+        kw: Dict[str, Any] = {"Bucket": BUCKET_NAME}
+        if region != "us-east-1":
+            kw["CreateBucketConfiguration"] = {"LocationConstraint": region}
+        s3.create_bucket(**kw)
+        logger.info("Created bucket %s", BUCKET_NAME)
+    s3.put_public_access_block(Bucket=BUCKET_NAME, PublicAccessBlockConfiguration={
+        "BlockPublicAcls": True, "IgnorePublicAcls": True, "BlockPublicPolicy": True, "RestrictPublicBuckets": True})
+    s3.put_bucket_versioning(Bucket=BUCKET_NAME, VersioningConfiguration={"Status": "Enabled"})   # Object version 으로 고정 가능
+    s3.put_bucket_encryption(Bucket=BUCKET_NAME, ServerSideEncryptionConfiguration={"Rules": [
+        {"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]})
+    s3.put_bucket_tagging(Bucket=BUCKET_NAME, Tagging={"TagSet": TAGS})
+    s3.put_object(Bucket=BUCKET_NAME, Key="skills/", Body=b"")
+    save_config(storage_bucket=BUCKET_NAME)
+    logger.info("✓ S3 bucket %s", BUCKET_NAME)
+    return BUCKET_NAME
+
+
+def ensure_log_pipeline() -> Dict[str, str]:
+    """MCP 요청 로그 저장·조회 파이프라인.
+
+    Firehose(동적 파티셔닝) → s3://<bucket>/logs/kind=mcp/target=<gateway-id>/dt=YYYY-MM-DD/*.json.gz (JSON Lines, gzip)
+    → Glue 테이블 request_logs(파티션 프로젝션이라 크롤러·MSCK 불필요) → Athena 워크그룹(스캔 상한·결과 자동 만료).
+    logs/ 는 90일 뒤 만료한다. ensure_storage_bucket() 이후에 호출한다.
+    """
+    logger.info("[logs] Firehose / Glue / Athena")
+    ensure_storage_bucket()
+    bucket_arn = f"arn:aws:s3:::{BUCKET_NAME}"
+    trust = {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Principal": {"Service": "firehose.amazonaws.com"},
+                                                      "Action": "sts:AssumeRole", "Condition": {"StringEquals": {"sts:ExternalId": account_id}}}]}
+    try:
+        role_arn = iam.get_role(RoleName=LOG_FIREHOSE_ROLE)["Role"]["Arn"]
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "NoSuchEntity":
+            raise
+        role_arn = iam.create_role(RoleName=LOG_FIREHOSE_ROLE, AssumeRolePolicyDocument=json.dumps(trust), Tags=TAGS,
+                                   Description="Firehose delivery role for ai-portal request logs")["Role"]["Arn"]
+        logger.info("Created role %s", LOG_FIREHOSE_ROLE)
+    iam.put_role_policy(RoleName=LOG_FIREHOSE_ROLE, PolicyName="deliver-logs", PolicyDocument=json.dumps({
+        "Version": "2012-10-17", "Statement": [
+            {"Effect": "Allow", "Resource": [bucket_arn, f"{bucket_arn}/logs/*"],
+             "Action": ["s3:AbortMultipartUpload", "s3:GetBucketLocation", "s3:GetObject", "s3:ListBucket",
+                        "s3:ListBucketMultipartUploads", "s3:PutObject"]}]}))
+    # 보존: logs/ 와 Athena 결과(athena-results/)만 만료한다. skills/ 는 건드리지 않는다
+    rules = [
+        {"ID": "expire-request-logs", "Status": "Enabled", "Filter": {"Prefix": "logs/"},
+         "Expiration": {"Days": LOG_RETENTION_DAYS}, "NoncurrentVersionExpiration": {"NoncurrentDays": 1},
+         "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1}},
+        {"ID": "expire-athena-results", "Status": "Enabled", "Filter": {"Prefix": "athena-results/"},
+         "Expiration": {"Days": 7}, "NoncurrentVersionExpiration": {"NoncurrentDays": 1}},
+    ]
+    try:
+        old = s3.get_bucket_lifecycle_configuration(Bucket=BUCKET_NAME)["Rules"]
+    except ClientError:
+        old = []
+    keep = [r for r in old if r.get("ID") not in {x["ID"] for x in rules}]
+    s3.put_bucket_lifecycle_configuration(Bucket=BUCKET_NAME, LifecycleConfiguration={"Rules": keep + rules})
+
+    prefix = ("logs/kind=!{partitionKeyFromQuery:kind}/target=!{partitionKeyFromQuery:target}/dt=!{partitionKeyFromQuery:dt}/")
+    cfg = {
+        "RoleARN": role_arn, "BucketARN": bucket_arn, "Prefix": prefix,
+        "ErrorOutputPrefix": "logs-errors/!{firehose:error-output-type}/dt=!{timestamp:yyyy-MM-dd}/",
+        "BufferingHints": {"SizeInMBs": 64, "IntervalInSeconds": 300},       # 동적 파티셔닝 최소 64MB. 5분마다 또는 64MB 마다 파일이 생긴다
+        "CompressionFormat": "GZIP",
+        "DynamicPartitioningConfiguration": {"Enabled": True, "RetryOptions": {"DurationInSeconds": 300}},
+        "ProcessingConfiguration": {"Enabled": True, "Processors": [
+            {"Type": "MetadataExtraction", "Parameters": [
+                {"ParameterName": "MetadataExtractionQuery", "ParameterValue": "{kind:.kind, target:.target, dt:.dt}"},
+                {"ParameterName": "JsonParsingEngine", "ParameterValue": "JQ-1.6"}]},
+            {"Type": "AppendDelimiterToRecord", "Parameters": [{"ParameterName": "Delimiter", "ParameterValue": "\\n"}]}]},
+    }
+    try:
+        firehose.describe_delivery_stream(DeliveryStreamName=LOG_STREAM)
+        firehose.update_destination(
+            DeliveryStreamName=LOG_STREAM,
+            CurrentDeliveryStreamVersionId=firehose.describe_delivery_stream(DeliveryStreamName=LOG_STREAM)
+            ["DeliveryStreamDescription"]["VersionId"],
+            DestinationId=firehose.describe_delivery_stream(DeliveryStreamName=LOG_STREAM)
+            ["DeliveryStreamDescription"]["Destinations"][0]["DestinationId"],
+            ExtendedS3DestinationUpdate=cfg)
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ResourceNotFoundException":
+            raise
+        for attempt in range(6):                                # 새 역할 전파 대기
+            try:
+                firehose.create_delivery_stream(DeliveryStreamName=LOG_STREAM, DeliveryStreamType="DirectPut",
+                                                ExtendedS3DestinationConfiguration=cfg, Tags=TAGS)
+                break
+            except ClientError as ce:
+                if ce.response["Error"]["Code"] == "InvalidArgumentException" and attempt < 5:
+                    time.sleep(10)
+                    continue
+                raise
+        logger.info("Created Firehose stream %s", LOG_STREAM)
+    stream_arn = firehose.describe_delivery_stream(DeliveryStreamName=LOG_STREAM)["DeliveryStreamDescription"]["DeliveryStreamARN"]
+
+    # Glue 테이블(파티션 프로젝션): kind 는 enum, target 은 쿼리에서 반드시 지정(injected), dt 는 최근 90일+여유
+    try:
+        glue.create_database(DatabaseInput={"Name": LOG_GLUE_DB, "Description": f"{project_name} request logs"})
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "AlreadyExistsException":
+            raise
+    cols = [("ts", "string"), ("point", "string"), ("rpc_id", "string"), ("req_hash", "string"), ("gateway", "string"),
+            ("method", "string"), ("mcp_target", "string"), ("tool", "string"), ("caller", "string"), ("user_email", "string"),
+            ("auth", "string"), ("arguments", "string"), ("blocked", "boolean"), ("block_reason", "string"),
+            ("status", "int"), ("is_error", "boolean"), ("error_message", "string"), ("resp_bytes", "bigint")]
+    table = {
+        "Name": LOG_GLUE_TABLE, "TableType": "EXTERNAL_TABLE",
+        "PartitionKeys": [{"Name": "kind", "Type": "string"}, {"Name": "target", "Type": "string"}, {"Name": "dt", "Type": "string"}],
+        "Parameters": {"classification": "json", "EXTERNAL": "TRUE", "projection.enabled": "true",
+                       "projection.kind.type": "enum", "projection.kind.values": "mcp,agent",
+                       "projection.target.type": "injected",
+                       "projection.dt.type": "date", "projection.dt.format": "yyyy-MM-dd",
+                       "projection.dt.range": f"NOW-{LOG_RETENTION_DAYS + 5}DAYS,NOW+1DAYS", "projection.dt.interval": "1",
+                       "projection.dt.interval.unit": "DAYS",
+                       "storage.location.template": f"s3://{BUCKET_NAME}/logs/kind=${{kind}}/target=${{target}}/dt=${{dt}}/"},
+        "StorageDescriptor": {
+            "Columns": [{"Name": n, "Type": t} for n, t in cols], "Location": f"s3://{BUCKET_NAME}/logs/",
+            "InputFormat": "org.apache.hadoop.mapred.TextInputFormat",
+            "OutputFormat": "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+            "SerdeInfo": {"SerializationLibrary": "org.openx.data.jsonserde.JsonSerDe",
+                          "Parameters": {"ignore.malformed.json": "true"}}}}
+    try:
+        glue.create_table(DatabaseName=LOG_GLUE_DB, TableInput=table)
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "AlreadyExistsException":
+            raise
+        glue.update_table(DatabaseName=LOG_GLUE_DB, TableInput=table)
+
+    wg = {"ResultConfiguration": {"OutputLocation": f"s3://{BUCKET_NAME}/athena-results/",
+                                  "EncryptionConfiguration": {"EncryptionOption": "SSE_S3"}},
+          "EnforceWorkGroupConfiguration": True, "PublishCloudWatchMetricsEnabled": False,
+          "BytesScannedCutoffPerQuery": LOG_ATHENA_SCAN_LIMIT}
+    try:
+        athena.create_work_group(Name=LOG_ATHENA_WORKGROUP, Configuration=wg, Description=f"{project_name} request log queries", Tags=TAGS)
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "InvalidRequestException":     # 이미 있으면 InvalidRequestException("already created")
+            raise
+        athena.update_work_group(WorkGroup=LOG_ATHENA_WORKGROUP, ConfigurationUpdates={
+            "ResultConfigurationUpdates": wg["ResultConfiguration"], "EnforceWorkGroupConfiguration": True,
+            "BytesScannedCutoffPerQuery": LOG_ATHENA_SCAN_LIMIT})
+    save_config(log_stream=LOG_STREAM, log_stream_arn=stream_arn, log_glue_database=LOG_GLUE_DB, log_glue_table=LOG_GLUE_TABLE,
+                log_athena_workgroup=LOG_ATHENA_WORKGROUP, log_retention_days=LOG_RETENTION_DAYS)
+    logger.info("✓ logs: %s → s3://%s/logs/ → Athena %s.%s (workgroup %s, %d일 보존)", LOG_STREAM, BUCKET_NAME, LOG_GLUE_DB,
+                LOG_GLUE_TABLE, LOG_ATHENA_WORKGROUP, LOG_RETENTION_DAYS)
+    return {"stream": LOG_STREAM, "stream_arn": stream_arn}
+
+
 def ensure_session_secret() -> str:
     name = f"{project_name}/session-signing-key"
     try:
@@ -918,9 +1112,13 @@ def create_ecs_roles(secret_arns: List[str]) -> Dict[str, str]:
                 "bedrock-agentcore:ListAgentRuntimes", "bedrock-agentcore:GetAgentRuntime",
                 # MCP 탭: AgentCore Gateway 동기화
                 "bedrock-agentcore:ListGateways", "bedrock-agentcore:GetGateway",
-                # IAM runtime MCP 테스트: runtime 을 IAM Gateway 의 target 으로 붙인다
+                # IAM runtime MCP 테스트 / 승인 프로세스: runtime 을 Gateway 의 target 으로 붙인다
                 "bedrock-agentcore:ListGatewayTargets", "bedrock-agentcore:GetGatewayTarget",
-                "bedrock-agentcore:CreateGatewayTarget"]},
+                "bedrock-agentcore:CreateGatewayTarget",
+                # 승인 불필요로 바꾸거나 Gateway 를 바꿀 때 target 제거
+                "bedrock-agentcore:DeleteGatewayTarget",
+                # runtime MCP 승인 프로세스: JWT Gateway 를 포털에서 새로 만든다
+                "bedrock-agentcore:CreateGateway"]},
             # 에이전트 생성: harness 를 만들고, Gateway 키를 AgentCore Identity 에 저장하며, harness 실행 역할을 넘긴다
             {"Sid": "CreateAgents", "Effect": "Allow", "Resource": "*", "Action": [
                 # CreateHarness 에 tags 를 넘기므로 TagResource 도 필요하다(없으면 AccessDenied)
@@ -940,8 +1138,16 @@ def create_ecs_roles(secret_arns: List[str]) -> Dict[str, str]:
                 "bedrock-agentcore:DeleteWorkloadIdentity",
                 "secretsmanager:CreateSecret", "secretsmanager:TagResource"]},
             {"Sid": "PassHarnessRole", "Effect": "Allow", "Action": "iam:PassRole",
-             "Resource": [f"arn:aws:iam::{account_id}:role/role-harness-for-{project_name}-{region}"],
+             "Resource": [
+                 f"arn:aws:iam::{account_id}:role/role-harness-for-{project_name}-{region}",
+                 # JWT Gateway 생성 시 설치기가 만든 gateway 서비스 역할을 넘긴다
+                 f"arn:aws:iam::{account_id}:role/role-gateway-for-{project_name}-{region}",
+             ],
              "Condition": {"StringEquals": {"iam:PassedToService": "bedrock-agentcore.amazonaws.com"}}},
+            # Gateway 역할에 InvokeAgentRuntime 정책을 붙여 runtime target 호출을 가능하게 한다
+            {"Sid": "GatewayRoleInvokeRuntime", "Effect": "Allow",
+             "Action": ["iam:PutRolePolicy", "iam:GetRole"],
+             "Resource": [f"arn:aws:iam::{account_id}:role/role-gateway-for-{project_name}-{region}"]},
             # Agent/MCP 테스트: 포털이 harness·runtime 을 호출한다
             {"Sid": "InvokeAgents", "Effect": "Allow", "Resource": "*", "Action": [
                 "bedrock-agentcore:InvokeHarness", "bedrock-agentcore:InvokeAgentRuntime",
@@ -957,6 +1163,22 @@ def create_ecs_roles(secret_arns: List[str]) -> Dict[str, str]:
             # 영구 저장소: 이 테이블 하나만. Scan 은 통계·검색을 서버에서 집계하기 위한 것(데이터가 작다)
             {"Sid": "PortalTable", "Effect": "Allow", "Resource": [f"arn:aws:dynamodb:{region}:{account_id}:table/{DDB_TABLE}"],
              "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:Scan"]},
+            # Skill zip 업로드/삭제: skills/ 아래만 허용
+            {"Sid": "SkillStorage", "Effect": "Allow", "Resource": [f"arn:aws:s3:::{BUCKET_NAME}/skills/*"],
+             "Action": ["s3:PutObject", "s3:GetObject", "s3:GetObjectVersion", "s3:DeleteObject", "s3:DeleteObjectVersion"]},
+            {"Sid": "SkillStorageList", "Effect": "Allow", "Resource": [f"arn:aws:s3:::{BUCKET_NAME}"],
+             "Action": ["s3:ListBucket", "s3:ListBucketVersions"]},
+            # 관리자 «로그 확인»: Athena 로 logs/ 를 조회하고 결과(athena-results/)를 읽는다. 워크그룹·DB 하나로 한정
+            {"Sid": "LogQuery", "Effect": "Allow", "Resource": [
+                f"arn:aws:athena:{region}:{account_id}:workgroup/{LOG_ATHENA_WORKGROUP}"],
+             "Action": ["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults", "athena:StopQueryExecution"]},
+            {"Sid": "LogCatalog", "Effect": "Allow", "Action": ["glue:GetDatabase", "glue:GetTable", "glue:GetPartitions"],
+             "Resource": [f"arn:aws:glue:{region}:{account_id}:catalog", f"arn:aws:glue:{region}:{account_id}:database/{LOG_GLUE_DB}",
+                          f"arn:aws:glue:{region}:{account_id}:table/{LOG_GLUE_DB}/{LOG_GLUE_TABLE}"]},
+            {"Sid": "LogRead", "Effect": "Allow", "Action": ["s3:GetObject"],
+             "Resource": [f"arn:aws:s3:::{BUCKET_NAME}/logs/*", f"arn:aws:s3:::{BUCKET_NAME}/athena-results/*"]},
+            {"Sid": "LogResultWrite", "Effect": "Allow", "Action": ["s3:PutObject", "s3:GetBucketLocation", "s3:ListBucket", "s3:AbortMultipartUpload"],
+             "Resource": [f"arn:aws:s3:::{BUCKET_NAME}", f"arn:aws:s3:::{BUCKET_NAME}/athena-results/*"]},
             # Playground 대화 저장소(사용자·agent 별 task 와 메시지). 목록은 Query 로만 읽으므로 Scan 은 주지 않는다
             {"Sid": "PlaygroundTable", "Effect": "Allow", "Resource": [f"arn:aws:dynamodb:{region}:{account_id}:table/{PLAYGROUND_DDB_TABLE}"],
              "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem", "dynamodb:Query"]},
@@ -1183,6 +1405,9 @@ def deploy_ecs(net: Dict[str, Any], alb: Dict[str, str], roles: Dict[str, str], 
         "LLM_GATEWAY_URL": read_env_file("LLM_GATEWAY_URL") or "https://llm.my-agentic-ai.click",
         # config.json 은 이미지에 넣지 않는다(.dockerignore) — 앱이 쓰는 값은 환경 변수로 전달한다
         "PORTAL_STORE": "dynamodb", "DDB_TABLE": DDB_TABLE,        # 재배포해도 유지되는 저장소
+        "STORAGE_BUCKET": BUCKET_NAME,
+        "LOG_GLUE_DB": LOG_GLUE_DB, "LOG_GLUE_TABLE": LOG_GLUE_TABLE, "LOG_ATHENA_WORKGROUP": LOG_ATHENA_WORKGROUP,
+        "LOG_RETENTION_DAYS": str(LOG_RETENTION_DAYS),                             # Skill zip 업로드 버킷
         "PLAYGROUND_DDB_TABLE": PLAYGROUND_DDB_TABLE,              # Playground 대화(task) 저장소
         "REGISTRY_ID": load_config().get("registry_id", ""),
         "HARNESS_ARN": load_config().get("harness_arn", ""),
@@ -1374,6 +1599,8 @@ def main() -> None:
     ap.add_argument("--registry-only", action="store_true", help="Registry 만 생성하고 종료")
     ap.add_argument("--notifications-only", action="store_true", help="승인 요청 메일 알림만 구성하고 종료")
     ap.add_argument("--table-only", action="store_true", help="DynamoDB 저장소 테이블만 만들고 종료")
+    ap.add_argument("--logs-only", action="store_true", help="MCP 요청 로그 파이프라인(Firehose·Glue·Athena)을 만들고 interceptor 에 반영한 뒤 종료")
+    ap.add_argument("--storage-only", action="store_true", help="Skill zip 용 S3 버킷만 만들고 종료")
     ap.add_argument("--harness-only", action="store_true", help="MCP 테스트용 harness agent 만 생성하고 종료")
     ap.add_argument("--gateway-only", action="store_true", help="AgentCore Gateway(+target, interceptor Lambda)만 생성하고 종료")
     ap.add_argument("--recreate-gateway", action="store_true",
@@ -1390,6 +1617,13 @@ def main() -> None:
     t0 = time.time()
     if args.table_only:
         ensure_table()
+        return
+    if args.storage_only:
+        ensure_storage_bucket()
+        return
+    if args.logs_only:
+        ensure_log_pipeline()
+        ensure_gateways()          # interceptor Lambda 에 LOG_STREAM·권한을 반영한다
         return
     if args.harness_only:
         ensure_harness()
@@ -1421,6 +1655,7 @@ def main() -> None:
         return
 
     ensure_harness()
+    ensure_log_pipeline()      # interceptor Lambda 가 LOG_STREAM 을 알아야 하므로 gateway 보다 먼저
     ensure_gateways()
     ensure_table()
     secret_arn = ensure_session_secret()

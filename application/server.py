@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import admins, agent_create, agent_test, approvals, auth, catalog, chat, db, mcp_apps, mcp_test, mcp_token, playground_api, usage
+from . import admins, agent_create, agent_test, approvals, auth, catalog, chat, db, mcp_apps, mcp_test, mcp_token, logs, playground_api, usage
 
 DIST = Path(__file__).resolve().parent / "web" / "dist"
 _docs = os.environ.get("ENABLE_API_DOCS") == "1"
@@ -147,6 +147,7 @@ app.include_router(approvals.reviewers_router)
 app.include_router(usage.router)
 app.include_router(mcp_token.router)
 app.include_router(approvals.dashboard_router)
+app.include_router(logs.router)
 app.include_router(playground_api.router)
 
 

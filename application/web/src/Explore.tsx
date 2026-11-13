@@ -205,6 +205,7 @@ export default function Explore({ user }: { user: User }) {
               </div>
               <footer>
                 <span title="상태가 바뀐 시각">{ago(it.status_at ?? it.updated_at)}</span>
+                {it.kind === "mcp" && it.data.kind === "runtime" && it.data.approval_required && <span className="badge st-PENDING_APPROVAL">승인 필요</span>}
                 {it.registry_status && <span className={`badge st-${it.registry_status}`}>{statusText(it.registry_status, it.usable)}</span>}
               </footer>
             </article>
@@ -221,7 +222,10 @@ export default function Explore({ user }: { user: User }) {
               <td className="ds"><div className="clip2" title={it.description}>{it.description || <em>설명 없음</em>}</div>
                 <div className="hint mono sm clip">{subtitle(it)}</div></td>
               <td className="nw">{ago(it.status_at ?? it.updated_at)}</td>
-              <td className="nw">{it.registry_status && <span className={`badge st-${it.registry_status}`}>{statusText(it.registry_status, it.usable)}</span>}</td>
+              <td className="nw">
+                {it.kind === "mcp" && it.data.kind === "runtime" && it.data.approval_required && <span className="badge st-PENDING_APPROVAL">승인 필요</span>}
+                {it.registry_status && <span className={`badge st-${it.registry_status}`}>{statusText(it.registry_status, it.usable)}</span>}
+              </td>
               <td className="nw"><div className="acts">
                 <button type="button" className="link" onClick={() => setOpen(it)}>Open</button>
                 {isAdmin && it.registry_record_id && <button type="button" className="link" onClick={() => setReviewerFor(it)}>Add reviewer</button>}

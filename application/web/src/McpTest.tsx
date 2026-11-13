@@ -34,6 +34,10 @@ export default function McpTest({ item }: { item: Item }) {
   const isAgent = item.kind === "agent";
   const isSkill = item.kind === "skill";
   const unsupported = !isAgent && d.kind === "gateway" && d.authorizer !== "AWS_IAM" && d.authorizer !== "CUSTOM_JWT";
+  // runtime + 승인 필요인데 Gateway 미연결 → 보내기 비활성(Gateway 를 MCP 로 붙여야 함)
+  const needsApprovalGw = !isAgent && !isSkill && d.kind === "runtime" && d.approval_required === true;
+  const approvalGwMissing = needsApprovalGw && !d.approval_gateway_id;
+  const viaApprovalGw = needsApprovalGw && !!d.approval_gateway_id;
   const [ready, setReady] = useState<boolean | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState("");
@@ -57,7 +61,7 @@ export default function McpTest({ item }: { item: Item }) {
 
   async function send() {
     const text = input.trim();
-    if (!text || busy) return;
+    if (!text || busy || approvalGwMissing) return;
     setErr(""); setInput(""); setBusy(true);
     const history = [...turns.filter((t) => t.role === "user" || t.content.trim()).map(({ role, content }) => ({ role, content })), { role: "user" as const, content: text }];   // 에러로 비어 버린 응답은 이력에서 뺀다
     setTurns([...turns, { role: "user", content: text }, { role: "assistant", content: "", parts: [] }]);
@@ -88,7 +92,9 @@ export default function McpTest({ item }: { item: Item }) {
     <div className="ptest">
       <p className="hint">{isAgent ? "이 agent를 호출해 프롬프트에 대한 응답과 도구 사용 과정을 확인합니다."
         : isSkill ? <>harness agent <code>ai_portal</code>이 이 skill을 불러와 사용합니다. skill이 다루는 작업을 요청해 보세요. 예: “사용 가능한 skill을 알려줘”</>
+        : viaApprovalGw ? <>harness agent <code>ai_portal</code>이 승인용 JWT Gateway <code>{d.approval_gateway_name || d.approval_gateway_id}</code> 를 MCP로 사용합니다. 예: “사용 가능한 도구를 알려줘”</>
         : <>harness agent <code>ai_portal</code>이 이 MCP를 도구로 사용합니다. 예: “사용 가능한 도구를 알려줘”</>}</p>
+      {approvalGwMissing && <p className="note" role="status">승인 프로세스용 JWT Gateway 를 먼저 연결해야 테스트할 수 있습니다.</p>}
       <div className={`chatbox${turns.length ? "" : " empty"}`} aria-live="polite">
         {turns.map((t, i) => (
           <div key={i} className={`bubble ${t.role}`} aria-label={t.role === "user" ? "내 메시지" : "agent 응답"}>
@@ -131,11 +137,12 @@ export default function McpTest({ item }: { item: Item }) {
       {err && <p className="note error" role="alert">{err}</p>}
       <div className="composer">
         <textarea rows={2} placeholder={isAgent ? "agent에게 보낼 프롬프트를 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)" : isSkill ? "skill을 사용하는 요청을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)" : "MCP 도구를 사용하는 요청을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)"} value={input} aria-label="메시지"
-          onChange={(e) => setInput(e.target.value)} disabled={busy || ready === null}
+          onChange={(e) => setInput(e.target.value)} disabled={busy || ready === null || approvalGwMissing}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }} />
         <div className="col">
           {busy ? <button type="button" className="btn ghost" onClick={() => abort.current?.abort()}>중단</button>
-                : <button type="button" className="btn" disabled={!input.trim() || ready !== true} onClick={send}>보내기</button>}
+                : <button type="button" className="btn" disabled={!input.trim() || ready !== true || approvalGwMissing}
+                  title={approvalGwMissing ? "JWT Gateway 를 먼저 연결하세요" : undefined} onClick={send}>보내기</button>}
           <button type="button" className="btn ghost" disabled={busy || turns.length === 0}
             onClick={() => { setTurns([]); setErr(""); session.current = newSession(); }}>새 대화</button>
         </div>
