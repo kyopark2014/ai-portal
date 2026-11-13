@@ -236,8 +236,7 @@ td .hint{margin:.1rem 0 0}
 .list-table td:nth-child(5) .badge{margin-left:0}
 .list-table .acts{display:flex;gap:.8rem;justify-content:flex-end}
 
-/* 에이전트 생성 · Gateway 연결 MCP */
-.mcp-pick-jwt{border:1px solid rgba(15,110,106,.28);border-radius:10px;padding:.55rem .7rem;background:rgba(15,110,106,.04)}
+/* 에이전트 생성 · Gateway 연결 MCP (테두리 없음 — 체크박스 정렬 유지) */
 .mcp-targets{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem;margin-top:.45rem}
 .mcp-targets-lbl{font-size:.72rem;font-weight:700;color:var(--teal);letter-spacing:.02em;margin-right:.15rem}
 .badge.mcp-target{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78rem;font-weight:700;padding:.25rem .65rem;border-radius:6px;background:#e3eaee;color:var(--ink)}
@@ -246,3 +245,8 @@ td .hint{margin:.1rem 0 0}
 /* 로그 확인 */
 .check{display:flex;align-items:center;gap:.5rem;font-size:.9rem;margin:.2rem 0}
 .check input{width:auto}
+.lv-results{margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--line)}
+.lv-results .page-head{margin-bottom:.35rem}
+.lv-table td.lv-time{white-space:nowrap}
+.lv-table td.lv-result{white-space:nowrap;width:1%;min-width:4.5rem}
+.lv-table td.lv-result .badge{white-space:nowrap;display:inline-block}

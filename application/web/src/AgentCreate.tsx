@@ -6,18 +6,30 @@ import { DetailModal } from "./Modals";
 const NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,39}$/;
 const STEPS = ["이름", "모델·프롬프트", "MCP", "Skill", "인증"] as const;
 
+/** Gateway JWT → Gateway IAM → MCP JWT → MCP IAM */
+function mcpSortKey(i: api.Item): [number, string] {
+  const d = i.data || {};
+  const jwt = d.kind === "gateway" ? d.authorizer === "CUSTOM_JWT" : d.auth === "JWT";
+  const group = d.kind === "gateway" ? (jwt ? 0 : 1) : (jwt ? 2 : 3);
+  return [group, (i.name || "").toLowerCase()];
+}
+
 function McpPick({ items, sel, toggle, empty }: {
   items: api.Item[]; sel: number[]; toggle: (id: number) => void; empty: string;
 }) {
   if (items.length === 0) return <p className="hint">{empty}</p>;
+  const ordered = [...items].sort((a, b) => {
+    const [ga, na] = mcpSortKey(a), [gb, nb] = mcpSortKey(b);
+    return ga !== gb ? ga - gb : na.localeCompare(nb);
+  });
   return (
     <ul className="pick" style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: ".4rem" }}>
-      {items.map((i) => {
+      {ordered.map((i) => {
         const d = i.data || {};
         const targets = Array.isArray(d.targets) ? (d.targets as string[]) : [];
-        const isPortal = d.kind === "gateway" && (i.name === "gw-ai-portal" || targets.includes("knowledge-mcp") || targets.includes("hr-advisor"));
+        const isJwtGw = d.kind === "gateway" && d.authorizer === "CUSTOM_JWT";
         return (
-          <li key={i.id} style={isPortal ? { border: "1px solid var(--accent, #3b82f6)", borderRadius: 8, padding: ".35rem .5rem", background: "rgba(59,130,246,.06)" } : undefined}>
+          <li key={i.id}>
             <label style={{ display: "flex", gap: ".6rem", alignItems: "flex-start", cursor: "pointer" }}>
               <input type="checkbox" checked={sel.includes(i.id)} onChange={() => toggle(i.id)} />
               <span>
@@ -26,8 +38,11 @@ function McpPick({ items, sel, toggle, empty }: {
                   {d.kind === "gateway" ? `Gateway · ${d.authorizer || ""}` : d.kind === "runtime" ? `runtime · ${d.auth || "IAM"}` : "MCP"}
                 </span>
                 {targets.length > 0 && (
-                  <span className="hint" style={{ display: "block" }}>
-                    연결 MCP: {targets.map((t) => <code key={t} style={{ marginRight: ".35rem" }}>{t}</code>)}
+                  <span className="mcp-targets">
+                    <span className="mcp-targets-lbl">연결 MCP</span>
+                    {targets.map((t) => (
+                      <span key={t} className={`badge mcp-target${isJwtGw ? " mcp-target-jwt" : ""}`}>{t}</span>
+                    ))}
                   </span>
                 )}
                 {i.description && <span className="hint" style={{ display: "block" }}>{i.description.slice(0, 120)}</span>}
@@ -199,7 +214,7 @@ export default function AgentCreate({ user }: { user: api.User }) {
           ? <button type="button" className="btn" disabled={!canNext || busy} onClick={() => setStep((s) => s + 1)}>다음</button>
           : <button type="button" className="btn" disabled={busy} onClick={submit}>{busy ? "생성 중…" : "생성"}</button>}
       </div>
-      {created && <DetailModal item={created} user={user} onClose={reset} onUpdated={setCreated} onDeleted={reset} />}
+      {created && <DetailModal item={created} user={user} onClose={reset} onChanged={setCreated} onDeleted={reset} />}
     </section>
   );
 }

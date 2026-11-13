@@ -5,7 +5,12 @@ import type { LogQuery, LogRow, LogTarget } from "./api";
 const ymd = (d: Date) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 const daysAgo = (n: number) => { const d = new Date(); d.setDate(d.getDate() - n); return ymd(d); };
 const kb = (n: number | null) => (n == null ? "-" : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
-const local = (iso: string) => { const t = new Date(iso); return isNaN(+t) ? iso : t.toLocaleString("ko-KR", { hour12: false }); };
+const local = (iso: string) => {
+  const t = new Date(iso);
+  if (isNaN(+t)) return iso;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${t.getFullYear()}. ${t.getMonth() + 1}. ${t.getDate()}. ${p(t.getHours())}:${p(t.getMinutes())}:${p(t.getSeconds())}`;
+};
 
 /** 관리자 «로그 확인»: MCP/Agent → 대상 → 기간·요청자 → Athena 조회(비동기) → 표 + CSV/JSON 다운로드. */
 export default function LogViewer() {
@@ -93,33 +98,35 @@ export default function LogViewer() {
       </form>
 
       {err && <p className="note error" role="alert">{err}</p>}
-      {phase === "done" && (<>
-        <div className="page-head">
-          <h3 style={{ flex: 1, margin: 0 }}>결과 {rows.length}건{meta.truncated ? "+" : ""}</h3>
-          <a className="btn ghost" href={api.logDownloadUrl(qid, "csv")}>CSV 다운로드</a>
-          <a className="btn ghost" href={api.logDownloadUrl(qid, "json")}>JSON 다운로드</a>
+      {phase === "done" && (
+        <div className="lv-results">
+          <div className="page-head">
+            <h3 style={{ flex: 1, margin: 0 }}>결과 {rows.length}건{meta.truncated ? "+" : ""}</h3>
+            <a className="btn ghost" href={api.logDownloadUrl(qid, "csv")}>CSV 다운로드</a>
+            <a className="btn ghost" href={api.logDownloadUrl(qid, "json")}>JSON 다운로드</a>
+          </div>
+          <p className="hint">
+            차단 {blockedN}건 · 오류 {errN}건 · 요청자 상위: {byUser.map(([u, n]) => `${u} (${n})`).join(", ") || "-"} · 스캔 {kb(meta.scanned)}
+            {meta.truncated ? " · 화면에는 최근 500건만 표시합니다. 다운로드에는 전체(최대 1만 건)가 들어갑니다." : ""}
+          </p>
+          <div className="tablewrap"><table className="lv-table">
+            <thead><tr><th>시간</th><th>요청자</th><th>Tool</th><th>요청 내용</th><th>결과</th><th className="n">지연(ms)</th></tr></thead>
+            <tbody>
+              {rows.length === 0 && <tr><td colSpan={6} className="empty">조건에 맞는 로그가 없습니다. 기록은 5분 단위로 저장되므로 방금 한 호출은 잠시 뒤에 보입니다.</td></tr>}
+              {rows.map((r, i) => (
+                <tr key={i} onClick={() => setOpen(open === i ? null : i)} style={{ cursor: "pointer" }}>
+                  <td className="lv-time">{local(r.time)}</td>
+                  <td>{who(r)}</td>
+                  <td>{r.tool || r.method}</td>
+                  <td style={{ maxWidth: 360, wordBreak: "break-all" }}>{open === i ? <pre style={{ whiteSpace: "pre-wrap", margin: 0 }}>{r.arguments ?? "-"}</pre> : (r.arguments ?? "-").slice(0, 80)}</td>
+                  <td className="lv-result">{r.blocked ? <span className="badge st-REJECTED" title={r.block_reason ?? ""}>차단</span>
+                    : r.is_error ? <span className="badge st-REJECTED" title={r.error_message ?? ""}>오류</span>
+                    : r.status == null ? <span className="hint">응답 없음</span> : <span className="badge st-APPROVED">성공</span>}</td>
+                  <td className="n">{r.latency_ms ?? "-"}</td>
+                </tr>))}
+            </tbody></table></div>
         </div>
-        <p className="hint">
-          차단 {blockedN}건 · 오류 {errN}건 · 요청자 상위: {byUser.map(([u, n]) => `${u} (${n})`).join(", ") || "-"} · 스캔 {kb(meta.scanned)}
-          {meta.truncated ? " · 화면에는 최근 500건만 표시합니다. 다운로드에는 전체(최대 1만 건)가 들어갑니다." : ""}
-        </p>
-        <div className="tablewrap"><table>
-          <thead><tr><th>시간</th><th>요청자</th><th>Tool</th><th>요청 내용</th><th>결과</th><th className="n">지연(ms)</th></tr></thead>
-          <tbody>
-            {rows.length === 0 && <tr><td colSpan={6} className="empty">조건에 맞는 로그가 없습니다. 기록은 5분 단위로 저장되므로 방금 한 호출은 잠시 뒤에 보입니다.</td></tr>}
-            {rows.map((r, i) => (
-              <tr key={i} onClick={() => setOpen(open === i ? null : i)} style={{ cursor: "pointer" }}>
-                <td style={{ whiteSpace: "nowrap" }}>{local(r.time)}</td>
-                <td>{who(r)}</td>
-                <td>{r.tool || r.method}</td>
-                <td style={{ maxWidth: 360, wordBreak: "break-all" }}>{open === i ? <pre style={{ whiteSpace: "pre-wrap", margin: 0 }}>{r.arguments ?? "-"}</pre> : (r.arguments ?? "-").slice(0, 80)}</td>
-                <td>{r.blocked ? <span className="badge st-REJECTED" title={r.block_reason ?? ""}>차단</span>
-                  : r.is_error ? <span className="badge st-REJECTED" title={r.error_message ?? ""}>오류</span>
-                  : r.status == null ? <span className="hint">응답 없음</span> : <span className="badge st-APPROVED">성공</span>}</td>
-                <td className="n">{r.latency_ms ?? "-"}</td>
-              </tr>))}
-          </tbody></table></div>
-      </>)}
+      )}
     </section>
   );
 }
