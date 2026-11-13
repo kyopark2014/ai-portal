@@ -9,6 +9,17 @@ import { DetailModal } from "./Modals";
 import GoogleButton, { disableAutoSelect } from "./GoogleButton";
 
 const ROLE_LABEL: Record<api.Role, string> = { admin: "관리자", user: "일반 사용자" };
+type Page = "home" | "explore" | "approvals" | "admin" | "agent";
+const PAGES: Page[] = ["home", "explore", "approvals", "admin", "agent"];
+const PAGE_KEY = "ai-portal.page";
+
+function loadPage(): Page {
+  try {
+    const v = localStorage.getItem(PAGE_KEY);
+    if (v && (PAGES as string[]).includes(v)) return v as Page;
+  } catch { /* private mode 등 */ }
+  return "explore";
+}
 
 export default function App() {
   const [cfg, setCfg] = useState<api.PublicConfig | null>(null);
@@ -39,12 +50,23 @@ export default function App() {
     setUser(null);
   }
 
-  const [page, setPage] = useState<"home" | "explore" | "approvals" | "admin" | "agent">("explore")
+  const [page, setPageState] = useState<Page>(loadPage);
+  function setPage(p: Page) {
+    setPageState(p);
+    try { localStorage.setItem(PAGE_KEY, p); } catch { /* */ }
+  }
   // 메일 링크(/approvals/<recordId>)로 들어오면 로그인 후 해당 record 검토 화면을 연다
   const [openRec, setOpenRec] = useState<string | null>(() => {
     const m = location.pathname.match(/^\/approvals\/([A-Za-z0-9_-]{6,64})$/);
     return m ? m[1] : null;
-  });;
+  });
+
+  // 권한 없는 메뉴가 기억돼 있으면 탐색으로 돌린다
+  useEffect(() => {
+    if (!user) return;
+    if (page === "approvals" && !user.can_review) setPage("explore");
+    else if (page === "admin" && user.role !== "admin") setPage("explore");
+  }, [user, page]);
 
   return (
     <main className="site">

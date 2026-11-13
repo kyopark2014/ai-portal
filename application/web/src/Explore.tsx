@@ -69,12 +69,39 @@ function CardMenu({ name, canDelete, onOpen, onDelete, onReviewer }: { name: str
   );
 }
 
+const KIND_KEY = "ai-portal.explore.kind";
+const VIEW_KEY = "ai-portal.explore.view";
+const KIND_IDS: Kind[] = ["prompt", "mcp", "skill", "agent"];
+
+function loadKind(): Kind {
+  try {
+    const v = localStorage.getItem(KIND_KEY);
+    if (v && (KIND_IDS as string[]).includes(v)) return v as Kind;
+  } catch { /* */ }
+  return "prompt";
+}
+function loadView(): "grid" | "list" {
+  try {
+    const v = localStorage.getItem(VIEW_KEY);
+    if (v === "grid" || v === "list") return v;
+  } catch { /* */ }
+  return "grid";
+}
+
 export default function Explore({ user }: { user: User }) {
-  const [kind, setKind] = useState<Kind>("prompt");
+  const [kind, setKindState] = useState<Kind>(loadKind);
   const [items, setItems] = useState<Item[]>([]);
   const [q, setQ] = useState("");
   const [mine, setMine] = useState(false);
-  const [view, setView] = useState<"grid" | "list">("grid");
+  const [view, setViewState] = useState<"grid" | "list">(loadView);
+  function setKind(k: Kind) {
+    setKindState(k);
+    try { localStorage.setItem(KIND_KEY, k); } catch { /* */ }
+  }
+  function setView(v: "grid" | "list") {
+    setViewState(v);
+    try { localStorage.setItem(VIEW_KEY, v); } catch { /* */ }
+  }
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [creating, setCreating] = useState(false);

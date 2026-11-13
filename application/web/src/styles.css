@@ -202,6 +202,11 @@ td .hint{margin:.1rem 0 0}
 .tablewrap td .badge.admin{margin-left:.45rem;vertical-align:middle}
 .tablewrap td.empty{text-align:center;color:var(--soft);padding:1.4rem}
 .tablewrap td .counts{min-width:7rem}
+/* Registry 등록 현황: 종류·합계는 내용 폭만, 남는 공간은 상태별이 가져간다 */
+.tablewrap table.reg-summary th:nth-child(1),
+.tablewrap table.reg-summary td:nth-child(1){width:1%;white-space:nowrap;padding-right:1.5rem}
+.tablewrap table.reg-summary th:nth-child(2),
+.tablewrap table.reg-summary td:nth-child(2){width:1%;padding-right:1.5rem}
 
 .modal-head .head-acts{margin-left:auto;margin-right:.6rem}
 

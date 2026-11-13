@@ -59,7 +59,7 @@ export default function AdminDashboard() {
         <section className="card" aria-labelledby="ad-reg">
           <h2 id="ad-reg">Registry 등록 현황 <span className="hint">type별 · 승인/진행 상태</span></h2>
           {d.registry.error && <p className="note error" role="alert">Registry 를 조회하지 못했습니다: {d.registry.error}</p>}
-          <div className="tablewrap"><table>
+          <div className="tablewrap"><table className="reg-summary">
             <thead><tr><th>종류</th><th className="n">합계</th><th>상태별</th></tr></thead>
             <tbody>{KINDS.map((k) => (
               <tr key={k}><td><strong>{KIND_LABEL[k]}</strong></td><td className="n">{sum(d.registry.by_type[k])}</td><td><Counts c={d.registry.by_type[k]} /></td></tr>))}</tbody>
