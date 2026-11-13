@@ -76,21 +76,22 @@ def test_installer_gateway_params_match_the_api_model():
     consts = src[src.index("def gateway_name"):src.index("def _package_lambda_zip")]
     gp = src[src.index("def gateway_params"):src.index("def _wait(")]
     cg = src[src.index("COGNITO_REGION = "):src.index("def ensure_cognito")]
-    exec("project_name='ai-portal'; region='us-west-2'; account_id='123456789012'\nfrom typing import *\nWEBSEARCH_REGION='us-east-1'\n" + consts + gp + cg, ns)
+    exec("project_name='ai-portal'; region='us-west-2'; account_id='123456789012'\nfrom typing import *\n" + consts + gp + cg, ns)
     model = botocore.session.get_session().create_client("bedrock-agentcore-control", region_name="us-west-2").meta.service_model
-    checks = [("CreateGateway", ns["gateway_params"]("arn:aws:iam::1:role/r", "arn:aws:lambda:us-east-1:1:function:f", n))
-              for n in ("gw-ai-portal-iam", "gw-websearch-iam")]
-    checks += [("CreateGatewayTarget", ns["target_params"]("gw-1", "https://example.com/mcp", ns["TARGET_NAME"])),
-               ("CreateGatewayTarget", ns["websearch_target_params"]("gw-1"))]
+    # IAM websearch gateway
+    iam = ns["gateway_params"]("arn:aws:iam::1:role/r", "arn:aws:lambda:us-west-2:1:function:f", ns["WEBSEARCH_GATEWAY_NAME"])
+    checks = [("CreateGateway", iam),
+              ("CreateGatewayTarget", ns["target_params"]("gw-1", "https://example.com/mcp", ns["TARGET_NAME"])),
+              ("CreateGatewayTarget", ns["websearch_target_params"]("gw-1"))]
     for op, params in checks:
         rep = ParamValidator().validate(params, model.operation_model(op).input_shape)
         assert not rep.has_errors(), rep.generate_report()
-    for _, g in checks[:2]:
-        assert g["authorizerType"] == "AWS_IAM" and g["protocolType"] == "MCP"
-        ic = g["interceptorConfigurations"][0]
-        assert ic["interceptionPoints"] == ["REQUEST", "RESPONSE"] and ic["interceptor"]["lambda"]["arn"].endswith(":function:f")
-    # JWT(Cognito) 인증 gateway
-    jwt = ns["gateway_params"]("arn:aws:iam::1:role/r", "arn:aws:lambda:us-east-1:1:function:f", ns["WEBSEARCH_JWT_GATEWAY_NAME"],
+    assert iam["authorizerType"] == "AWS_IAM" and iam["protocolType"] == "MCP"
+    ic = iam["interceptorConfigurations"][0]
+    assert ic["interceptionPoints"] == ["REQUEST", "RESPONSE"] and ic["interceptor"]["lambda"]["arn"].endswith(":function:f")
+    assert ic["inputConfiguration"] == {"passRequestHeaders": False}  # IAM: 서명은 안 넘긴다
+    # JWT(Cognito) 인증 gateway (gw-ai-portal)
+    jwt = ns["gateway_params"]("arn:aws:iam::1:role/r", "arn:aws:lambda:us-west-2:1:function:f", ns["PORTAL_JWT_GATEWAY_NAME"],
                                {"discovery_url": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_X/.well-known/openid-configuration", "client_id": "abc123"})
     rep = ParamValidator().validate(jwt, model.operation_model("CreateGateway").input_shape)
     assert not rep.has_errors(), rep.generate_report()
@@ -98,8 +99,7 @@ def test_installer_gateway_params_match_the_api_model():
     assert jwt["authorizerConfiguration"]["customJWTAuthorizer"] == {
         "discoveryUrl": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_X/.well-known/openid-configuration", "allowedClients": ["abc123"]}
     assert jwt["interceptorConfigurations"][0]["interceptionPoints"] == ["REQUEST", "RESPONSE"]
-    assert jwt["interceptorConfigurations"][0]["inputConfiguration"] == {"passRequestHeaders": True}           # 토큰의 그룹을 읽으려면 필요
-    assert checks[0][1]["interceptorConfigurations"][0]["inputConfiguration"] == {"passRequestHeaders": False}  # IAM: 서명은 안 넘긴다
+    assert jwt["interceptorConfigurations"][0]["inputConfiguration"] == {"passRequestHeaders": True}  # 토큰의 그룹을 읽으려면 필요
     # Cognito 파라미터
     cog = boto3.client("cognito-idp", region_name="us-east-1").meta.service_model
     pairs = [("CreateUserPool", ns["cognito_pool_params"]()),
@@ -110,16 +110,15 @@ def test_installer_gateway_params_match_the_api_model():
     c = pairs[1][1]
     assert c["AccessTokenValidity"] == 24 and c["TokenValidityUnits"]["AccessToken"] == "hours"          # Cognito 최대(86400초)
     assert c["RefreshTokenValidity"] == 3650 and c["TokenValidityUnits"]["RefreshToken"] == "days"        # Cognito 최대(약 10년)
-    assert c["EnableTokenRevocation"] is True and c["GenerateSecret"] is False 
+    assert c["EnableTokenRevocation"] is True and c["GenerateSecret"] is False
     assert c["ExplicitAuthFlows"] == ["ALLOW_REFRESH_TOKEN_AUTH", "ALLOW_ADMIN_USER_PASSWORD_AUTH"] and "AllowedOAuthFlows" not in c and "CallbackURLs" not in c      # 호스티드 UI/OAuth·federation 미사용
     assert pairs[0][1]["AdminCreateUserConfig"] == {"AllowAdminCreateUserOnly": True}                    # 셀프 가입 금지
-    ws = checks[3][1]
+    ws = checks[2][1]
     assert ws["targetConfiguration"]["mcp"]["connector"]["source"]["connectorId"] == "web-search"
     assert ws["credentialProviderConfigurations"] == [{"credentialProviderType": "GATEWAY_IAM_ROLE"}]
-    assert checks[0][1]["name"] == "gw-ai-portal-iam"
-    assert ns["PORTAL_JWT_GATEWAY_NAME"] == "gw-ai-portal-jwt" and ns["PORTAL_IAM_GATEWAY_NAME"] == "gw-ai-portal-iam"
-    assert ns["WEBSEARCH_JWT_GATEWAY_NAME"] == "gw-websearch-jwt" and ns["WEBSEARCH_IAM_GATEWAY_NAME"] == "gw-websearch-iam"
-    assert ns["INTERCEPTOR_FUNCTION"] == "lambda-ai-portal-intercepter" and ns["WEBSEARCH_REGION"] == "us-east-1"
+    assert ws["name"] == "websearch"
+    assert ns["PORTAL_JWT_GATEWAY_NAME"] == "gw-ai-portal" and ns["WEBSEARCH_GATEWAY_NAME"] == "gw-websearch"
+    assert ns["INTERCEPTOR_FUNCTION"] == "lambda-ai-portal-intercepter" and ns["WEBSEARCH_REGION"] == "us-west-2"
     # 기존 us-west-2 역할 이름은 바뀌지 않는다(이미 만든 리소스를 재사용해야 한다)
     assert ns["interceptor_role_name"]("us-west-2") == "role-lambda-interceptor-for-ai-portal-us-west-2"
     assert ns["gateway_role_name"]("us-west-2") == "role-gateway-for-ai-portal-us-west-2"
@@ -171,30 +170,48 @@ import base64
 
 
 class FakeAws:
-    """Cognito(sub→email)와 포털 DynamoDB(MCP 항목 + data.approved_users)를 흉내 낸다."""
-    def __init__(self, approved=(EMAIL,), owner="owner@x.com", gateway=GW_ID, email=EMAIL, fail=None):
+    """Cognito(sub→email)와 포털 DynamoDB(MCP 항목 + data.approved_users)를 흉내 낸다.
+    runtimes: [{name, approved, sk}] — 승인 필요 runtime target(예: hr_advisor → hr-advisor)."""
+    def __init__(self, approved=(EMAIL,), owner="owner@x.com", gateway=GW_ID, email=EMAIL, fail=None, runtimes=None):
         self.approved = list(approved) if approved is not None else None
         self.owner, self.gateway, self.email, self.fail, self.calls = owner, gateway, email, fail, []
+        self.runtimes = runtimes or []
 
     def admin_get_user(self, **kw):
         self.calls.append(("cognito", kw["Username"]))
         if self.fail: raise self.fail
         return {"UserAttributes": [{"Name": "email", "Value": self.email}]} if self.email else {"UserAttributes": []}
 
-    def _data(self, with_users=True):
+    def _gw_data(self, with_users=True):
         d = {"kind": "gateway", "gateway_id": self.gateway}
         if with_users and self.approved is not None: d["approved_users"] = self.approved
+        return json.dumps(d)
+
+    def _rt_data(self, rt, with_users=True):
+        d = {"kind": "runtime", "approval_required": True, "approval_gateway_id": self.gateway}
+        if with_users and rt.get("approved") is not None: d["approved_users"] = rt["approved"]
         return json.dumps(d)
 
     def query(self, **kw):
         self.calls.append(("query", kw["ExpressionAttributeValues"][":p"]["S"]))
         if self.fail: raise self.fail
-        return {"Items": [{"sk": {"S": f"{ITEM:010d}"}, "data": {"S": self._data(False)}}]}
+        items = [{"sk": {"S": f"{ITEM:010d}"}, "name": {"S": "gw"}, "data": {"S": self._gw_data(False)}}]
+        for i, rt in enumerate(self.runtimes):
+            sk = rt.get("sk") or f"{ITEM + 1 + i:010d}"
+            items.append({"sk": {"S": sk}, "name": {"S": rt["name"]}, "data": {"S": self._rt_data(rt, False)}})
+        return {"Items": items}
 
     def get_item(self, **kw):
-        self.calls.append(("get_item", kw["Key"]["pk"]["S"], kw["Key"]["sk"]["S"]))
+        sk = kw["Key"]["sk"]["S"]
+        self.calls.append(("get_item", kw["Key"]["pk"]["S"], sk))
         if self.fail: raise self.fail
-        return {"Item": {"owner": {"S": self.owner}, "data": {"S": self._data()}}}
+        if sk == f"{ITEM:010d}":
+            return {"Item": {"owner": {"S": self.owner}, "name": {"S": "gw"}, "data": {"S": self._gw_data()}}}
+        for i, rt in enumerate(self.runtimes):
+            rsk = rt.get("sk") or f"{ITEM + 1 + i:010d}"
+            if sk == rsk:
+                return {"Item": {"owner": {"S": self.owner}, "name": {"S": rt["name"]}, "data": {"S": self._rt_data(rt)}}}
+        return {}
 
 
 @pytest.fixture
@@ -203,7 +220,7 @@ def aws(lam, monkeypatch):
         fake = FakeAws(**kw)
         monkeypatch.setattr(lam, "TABLE", "ai-portal"); monkeypatch.setattr(lam, "POOL_ID", "us-east-1_pool")
         monkeypatch.setattr(lam, "_clients", {"cognito-idp": fake, "dynamodb": fake})
-        monkeypatch.setattr(lam, "_emails", {}); monkeypatch.setattr(lam, "_ids", {"at": 0.0, "map": {}})
+        monkeypatch.setattr(lam, "_emails", {}); monkeypatch.setattr(lam, "_ids", {"at": 0.0, "map": {}, "targets": {}})
         return fake
     return make
 
@@ -221,6 +238,19 @@ def test_user_not_in_the_approved_list_is_rejected_even_if_others_are(lam, aws):
     body = out["mcp"]["transformedGatewayResponse"]["body"]
     assert body["id"] == 5 and body["error"]["message"].startswith("이 MCP 서버의 사용이 승인되지 않았습니다")
     assert out["mcp"]["transformedGatewayResponse"]["statusCode"] == 200
+
+
+def test_bound_runtime_target_requires_that_runtime_approval_not_just_gateway(lam, aws):
+    """gw-ai-portal 사용 승인만으로는 hr-advisor tools/call 이 통과하면 안 된다."""
+    aws(approved=[EMAIL], runtimes=[{"name": "hr_advisor", "approved": ["e2npark@gmail.com"]}])
+    assert blocked(lam.handler(jreq(jwt(), method="tools/call", name="hr-advisor___sql", arguments={"q": "x"}), None))
+    assert not blocked(lam.handler(jreq(jwt(), method="tools/call", name="knowledge-mcp___search", arguments={}), None))
+    assert not blocked(lam.handler(jreq(jwt(), method="tools/list"), None))           # gateway 승인이 있으면 목록 OK
+    # runtime 승인이 있으면 그 target 호출은 통과(gateway 승인 없어도)
+    aws(approved=[], runtimes=[{"name": "hr_advisor", "approved": [EMAIL]}])
+    assert not blocked(lam.handler(jreq(jwt(), method="tools/call", name="hr-advisor___sql", arguments={}), None))
+    assert blocked(lam.handler(jreq(jwt(), method="tools/call", name="knowledge-mcp___search", arguments={}), None))
+    assert not blocked(lam.handler(jreq(jwt(), method="tools/list"), None))           # runtime 만 승인돼도 목록은 허용
 
 
 def test_missing_or_empty_approved_list_rejects_everyone_but_the_owner(lam, aws):

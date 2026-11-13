@@ -1,10 +1,44 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import * as api from "./api";
 import { DetailModal } from "./Modals";
 
 /** "에이전트 생성" 탭: 이름 → 모델·프롬프트 → MCP → Skill → 인증 → 생성 (AgentCore harness). */
 const NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,39}$/;
 const STEPS = ["이름", "모델·프롬프트", "MCP", "Skill", "인증"] as const;
+
+function McpPick({ items, sel, toggle, empty }: {
+  items: api.Item[]; sel: number[]; toggle: (id: number) => void; empty: string;
+}) {
+  if (items.length === 0) return <p className="hint">{empty}</p>;
+  return (
+    <ul className="pick" style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: ".4rem" }}>
+      {items.map((i) => {
+        const d = i.data || {};
+        const targets = Array.isArray(d.targets) ? (d.targets as string[]) : [];
+        const isPortal = d.kind === "gateway" && (i.name === "gw-ai-portal" || targets.includes("knowledge-mcp") || targets.includes("hr-advisor"));
+        return (
+          <li key={i.id} style={isPortal ? { border: "1px solid var(--accent, #3b82f6)", borderRadius: 8, padding: ".35rem .5rem", background: "rgba(59,130,246,.06)" } : undefined}>
+            <label style={{ display: "flex", gap: ".6rem", alignItems: "flex-start", cursor: "pointer" }}>
+              <input type="checkbox" checked={sel.includes(i.id)} onChange={() => toggle(i.id)} />
+              <span>
+                <b>{i.name}</b>{" "}
+                <span className="hint">
+                  {d.kind === "gateway" ? `Gateway · ${d.authorizer || ""}` : d.kind === "runtime" ? `runtime · ${d.auth || "IAM"}` : "MCP"}
+                </span>
+                {targets.length > 0 && (
+                  <span className="hint" style={{ display: "block" }}>
+                    연결 MCP: {targets.map((t) => <code key={t} style={{ marginRight: ".35rem" }}>{t}</code>)}
+                  </span>
+                )}
+                {i.description && <span className="hint" style={{ display: "block" }}>{i.description.slice(0, 120)}</span>}
+              </span>
+            </label>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
 
 function Pick({ items, sel, toggle, empty, sub }: {
   items: api.Item[]; sel: number[]; toggle: (id: number) => void; empty: string; sub: (i: api.Item) => string;
@@ -21,6 +55,14 @@ function Pick({ items, sel, toggle, empty, sub }: {
       ))}
     </ul>
   );
+}
+
+function needsJwt(items: api.Item[], ids: number[]) {
+  return ids.some((id) => {
+    const d = items.find((x) => x.id === id)?.data || {};
+    return (d.kind === "gateway" && d.authorizer === "CUSTOM_JWT")
+      || (d.kind === "runtime" && d.approval_required && d.approval_gateway_id);
+  });
 }
 
 export default function AgentCreate({ user }: { user: api.User }) {
@@ -42,17 +84,18 @@ export default function AgentCreate({ user }: { user: api.User }) {
   const [loadErr, setLoadErr] = useState("");
   const [created, setCreated] = useState<api.Item | null>(null);
 
+  const jwtForced = useMemo(() => needsJwt(mcps, mcpSel), [mcps, mcpSel]);
+  useEffect(() => { if (jwtForced) setAuthKind("JWT"); }, [jwtForced]);
+
   useEffect(() => {
     api.getAgentModels().then((r) => {
       const ok = r.models.filter((m) => m.usable);
       setModels(ok); setModel((cur) => cur || (ok.find((m) => m.id.endsWith("claude-sonnet-5-5")) ?? ok[0])?.id || "");
     }).catch((e) => setLoadErr(`모델 목록: ${e.message}`));
-    // 기본은 레지스트리 프롬프트. 선택할 프롬프트가 없으면 직접 입력으로 돌려 "다음"이 막히지 않게 한다
     api.listItems("prompt").then((l) => { setPrompts(l); if (l.length === 0) setMode("text"); })
       .catch(() => setMode("text"));
-    api.listItems("mcp").then((l) => setMcps(l.filter((i) =>
-      i.usable && !(i.data.kind === "gateway" && i.data.authorizer === "CUSTOM_JWT")))).catch(() => {});
-    api.listItems("skill").then(setSkills).catch(() => {});
+    api.getAgentMcps().then(setMcps).catch(() => {});
+    api.listItems("skill").then((l) => setSkills(l.filter((i) => i.usable || i.registry_status === "APPROVED"))).catch(() => {});
   }, [user.email]);
 
   const toggle = (set: (f: (p: number[]) => number[]) => void) => (id: number) =>
@@ -66,7 +109,7 @@ export default function AgentCreate({ user }: { user: api.User }) {
     try {
       setCreated(await api.createAgent({
         name, model, system_prompt: mode === "text" ? text : "", prompt_id: mode === "registry" ? promptId : null,
-        mcp_ids: mcpSel, skill_ids: skillSel, auth: authKind,
+        mcp_ids: mcpSel, skill_ids: skillSel, auth: jwtForced ? "JWT" : authKind,
       }));
     } catch (e: any) { setErr(e.message); }
     setBusy(false);
@@ -117,9 +160,8 @@ export default function AgentCreate({ user }: { user: api.User }) {
       </>)}
 
       {step === 2 && (<>
-        <p className="sub">사용할 수 있는 MCP 를 하나 이상 선택합니다 (선택 사항). 사용 신청이 승인된 MCP 와 내가 등록한 MCP 만 보입니다.</p>
-        <Pick items={mcps} sel={mcpSel} toggle={toggle(setMcpSel)} empty="사용 가능한 MCP 가 없습니다."
-              sub={(i) => i.data.kind === "gateway" ? `Gateway · ${i.data.authorizer}` : "MCP 서버"} />
+        <p className="sub">사용할 MCP 를 선택합니다. 승인 필요 runtime 은 Gateway target 이므로 Gateway(예: gw-ai-portal)를 고르세요.</p>
+        <McpPick items={mcps} sel={mcpSel} toggle={toggle(setMcpSel)} empty="사용 가능한 MCP 가 없습니다." />
       </>)}
 
       {step === 3 && (<>
@@ -130,8 +172,15 @@ export default function AgentCreate({ user }: { user: api.User }) {
 
       {step === 4 && (<>
         <div className="field" style={{ marginBottom: "1.25rem" }}><span className="lbl" style={{ marginBottom: ".4rem" }}>인증</span>
-          <label style={{ display: "block", marginBottom: ".6rem" }}><input type="radio" checked={authKind === "IAM"} onChange={() => setAuthKind("IAM")} /> IAM <span className="hint">AWS 자격 증명(SigV4)으로 호출</span></label>
-          <label style={{ display: "block" }}><input type="radio" checked={authKind === "JWT"} onChange={() => setAuthKind("JWT")} /> JWT Tokens <span className="hint">Cognito 가 발급한 토큰으로 호출</span></label>
+          {jwtForced ? (
+            <p className="hint">JWT Gateway MCP 가 선택되어 인증은 JWT 로 고정됩니다.</p>
+          ) : (
+            <>
+              <label style={{ display: "block", marginBottom: ".6rem" }}><input type="radio" checked={authKind === "IAM"} onChange={() => setAuthKind("IAM")} /> IAM <span className="hint">AWS 자격 증명(SigV4)으로 호출</span></label>
+              <label style={{ display: "block" }}><input type="radio" checked={authKind === "JWT"} onChange={() => setAuthKind("JWT")} /> JWT Tokens <span className="hint">Cognito 가 발급한 토큰으로 호출</span></label>
+            </>
+          )}
+          {jwtForced && <label style={{ display: "block" }}><input type="radio" checked readOnly /> JWT Tokens <span className="hint">Cognito 가 발급한 토큰으로 호출</span></label>}
         </div>
         <h3 style={{ margin: "0 0 .6rem", paddingTop: "1rem", borderTop: "1px solid var(--line)", fontSize: ".9rem" }}>생성할 에이전트</h3>
         <dl className="kv">
@@ -139,19 +188,18 @@ export default function AgentCreate({ user }: { user: api.User }) {
           <div><dt>프롬프트</dt><dd>{mode === "registry" ? prompts.find((p) => p.id === promptId)?.name : text.trim() ? `직접 입력 (${text.trim().length}자)` : "없음"}</dd></div>
           <div><dt>MCP</dt><dd>{mcps.filter((m) => mcpSel.includes(m.id)).map((m) => m.name).join(", ") || "없음"}</dd></div>
           <div><dt>Skill</dt><dd>{skills.filter((m) => skillSel.includes(m.id)).map((m) => m.name).join(", ") || "없음"}</dd></div>
+          <div><dt>인증</dt><dd>{jwtForced ? "JWT" : authKind}</dd></div>
         </dl>
       </>)}
 
       {err && <p className="note error" role="alert">{err}</p>}
       <div className="actions" style={{ marginTop: "1rem" }}>
-        {step > 0 && <button className="btn ghost" disabled={busy} onClick={() => setStep(step - 1)}>이전</button>}
+        {step > 0 && <button type="button" className="btn ghost" disabled={busy} onClick={() => setStep((s) => s - 1)}>이전</button>}
         {step < STEPS.length - 1
-          ? <button className="btn" disabled={!canNext} onClick={() => setStep(step + 1)}>다음</button>
-          : <button className="btn" disabled={busy} onClick={submit}>{busy ? "생성 중…" : "생성"}</button>}
+          ? <button type="button" className="btn" disabled={!canNext || busy} onClick={() => setStep((s) => s + 1)}>다음</button>
+          : <button type="button" className="btn" disabled={busy} onClick={submit}>{busy ? "생성 중…" : "생성"}</button>}
       </div>
-
-      {created && <DetailModal item={created} user={user} onClose={reset}
-        onChanged={setCreated} onDeleted={reset} />}
+      {created && <DetailModal item={created} user={user} onClose={reset} onUpdated={setCreated} onDeleted={reset} />}
     </section>
   );
 }

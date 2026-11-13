@@ -11,7 +11,7 @@ hr_data_sample.csv 를 적재한 뒤 hr-advisor MCP Runtime을 배포합니다.
   3. employees 테이블 생성 + CSV 적재
   4. IAM role / ECR / Docker 이미지 푸시
   5. AgentCore Runtime (MCP) 생성·갱신
-  6. gw-ai-portal-jwt · gw-ai-portal-iam Gateway target 연결
+  6. gw-ai-portal Gateway target 연결
 
 사용:
   python runtime/installer_hr.py
@@ -976,12 +976,12 @@ def _attach_hr_target(gateway_id: str, mcp_url: str) -> str:
     return target_id
 
 
-# config.json 의 gateway 키 접두사 → hr-advisor target ID 를 기록할 키 (포털 리전의 JWT·IAM gateway 두 개에 같은 target 을 붙인다)
-HR_TARGET_KEYS = {"gateway_id": "hr_advisor_mcp_gateway_target_id", "gateway_iam_id": "hr_advisor_mcp_gateway_iam_target_id"}
+# config.json 의 gateway 키 → hr-advisor target ID 기록 키 (포털 JWT Gateway 에만 붙인다)
+HR_TARGET_KEYS = {"gateway_id": "hr_advisor_mcp_gateway_target_id"}
 
 
 def ensure_hr_advisor_gateway_target(mcp_info: Dict[str, str]) -> Dict[str, str]:
-    logger.info("[6/6] Attaching HR Advisor MCP to project Gateways (jwt · iam)")
+    logger.info("[6/6] Attaching HR Advisor MCP to gw-ai-portal")
     cfg = load_config()
     gateways = [(k, cfg[k]) for k in HR_TARGET_KEYS if cfg.get(k)]
     if not gateways:
@@ -1016,7 +1016,7 @@ def deploy_db() -> Dict[str, str]:
 
 
 def ensure_all(*, skip_docker: bool = False) -> Dict[str, str]:
-    """Aurora + HR Advisor MCP Runtime + gw-ai-portal-jwt/iam target (idempotent).
+    """Aurora + HR Advisor MCP Runtime + gw-ai-portal target (idempotent).
 
     `ai-portal/installer.py` 가 호출하는 진입점.
     """

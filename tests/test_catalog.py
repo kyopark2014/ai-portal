@@ -369,3 +369,17 @@ def test_create_allows_name_when_registry_has_no_match(env, monkeypatch):
     FakeRegistry.records = [{"recordId": "r1", "name": "other", "status": "APPROVED"}]
     r = client("a@x.com").post("/api/mcp", json={"name": "last30days", "endpoint": "https://e.example/mcp"})
     assert r.status_code == 200
+
+
+def test_approved_skill_and_prompt_are_marked_usable_without_usage_request(env):
+    """Skill·Prompt 는 사용 신청이 없고 Registry APPROVED 만이면 «사용 가능»."""
+    sid = db.insert_item("skill", "docx", "", "a@x.com", {"source_type": "s3", "s3_uri": "s3://b/p"})
+    db.update_item(sid, registry_status="APPROVED", registry_record_id="recSkill0001")
+    assert client("b@x.com").get("/api/catalog/skill").json()["items"][0]["usable"] is True
+    db.update_item(sid, registry_status="DRAFT")
+    assert "usable" not in client("a@x.com").get("/api/catalog/skill").json()["items"][0]
+    pid = db.insert_item("prompt", "harness_prompt", "", "a@x.com", {"prompt_id": "P1", "text": "hi"})
+    db.update_item(pid, registry_status="APPROVED", registry_record_id="recPrompt0001")
+    assert client("b@x.com").get("/api/catalog/prompt").json()["items"][0]["usable"] is True
+    db.update_item(pid, registry_status="PENDING_APPROVAL")
+    assert "usable" not in client("a@x.com").get("/api/catalog/prompt").json()["items"][0]

@@ -4,7 +4,9 @@ from fastapi.testclient import TestClient
 from application import agent_create, auth, aws, catalog, db, gateway, mcp_token, server
 
 
-def _grant(item_id, email="a@x.com"):          # 소유자도 사용 신청이 승인되어야 쓸 수 있다
+def _grant(item_id, email="a@x.com"):
+    """Registry 등록 + 사용 신청 승인. 에이전트에 붙이려면 둘 다 필요하다."""
+    db.update_item(item_id, registry_id="REG", registry_record_id=f"rec{item_id:08d}", registry_status="APPROVED")
     db.put_usage_request(item_id, email, "PENDING"); db.put_usage_request(item_id, email, "APPROVED", decided_by="t")
 
 
@@ -21,12 +23,17 @@ def env(monkeypatch, tmp_path):
         {"id": "m2", "usable": False, "provider": "BEDROCK", "endpoint": None},
         {"id": "gpt-x", "usable": True, "provider": "BEDROCK_RUNTIME_OPENAI", "endpoint": "chat"}])
     monkeypatch.setattr(agent_create, "role_arn", lambda: "arn:aws:iam::123456789012:role/r")
+    monkeypatch.setattr(aws, "account_id", lambda: "123456789012")
+    monkeypatch.setattr(aws, "region", lambda: "us-west-2")
     calls = []
+    n = {"i": 0}
 
     class C:
         def create_harness(self, **kw):
             calls.append(kw)
-            return {"harness": {"harnessId": "h-1", "arn": "arn:aws:bedrock-agentcore:us-west-2:123456789012:harness/h-1", "status": "CREATING"}}
+            n["i"] += 1
+            hid = f"h-{n['i']}"
+            return {"harness": {"harnessId": hid, "arn": f"arn:aws:bedrock-agentcore:us-west-2:123456789012:harness/{hid}", "status": "CREATING"}}
     monkeypatch.setattr(aws, "client", lambda s: C())
     return calls
 
@@ -53,7 +60,7 @@ def test_create_with_text_prompt_and_iam(env):
     assert kw["harnessName"] == "my_agent" and kw["systemPrompt"] == [{"text": "be nice"}]
     assert kw["model"] == {"bedrockModelConfig": {"modelId": "global.anthropic.m1", "maxTokens": 4096}} and "authorizerConfiguration" not in kw
     it = db.list_items("agent")[0]
-    assert it["ext_id"] == "harness:h-1" and it["data"]["agent_type"] == "harness"
+    assert it["ext_id"].startswith("harness:h-") and it["data"]["agent_type"] == "harness"
 
 
 def test_unusable_model_and_duplicate(env):
@@ -77,15 +84,30 @@ def test_mcp_without_usage_approval_is_refused(env):
     assert post(client("b@x.com"), mcp_ids=[mid]).status_code == 403 and not env
 
 
-def test_jwt_gateway_mcp_refused_and_jwt_auth(env, monkeypatch):
-    mid = db.insert_item("mcp", "gw", "", "a@x.com", {"kind": "gateway", "authorizer": "CUSTOM_JWT", "gateway_id": "g1", "endpoint": "https://g"})
+def test_jwt_gateway_mcp_not_baked_and_forces_jwt_auth(env, monkeypatch):
+    """JWT Gateway 는 create 때 bake 하지 않고(호출 시 remote_mcp+Bearer), harness 인증은 JWT 로 강제한다."""
+    mid = db.insert_item("mcp", "gw", "", "a@x.com",
+                         {"kind": "gateway", "authorizer": "CUSTOM_JWT", "gateway_id": "g1",
+                          "endpoint": "https://g.example/mcp", "region": "us-west-2"})
     _grant(mid)
-    assert post(client(), mcp_ids=[mid]).status_code == 422
-    assert post(client(), auth="JWT").status_code == 503              # Cognito 미설치
     monkeypatch.setattr(mcp_token, "settings", lambda: {"pool": "p1", "client": "c1", "region": "us-east-1"})
-    assert post(client(), auth="JWT").status_code == 200
+    r = post(client(), name="with_jwt_gw", mcp_ids=[mid], auth="IAM")
+    assert r.status_code == 200, r.text
+    assert "tools" not in env[0]
     a = env[0]["authorizerConfiguration"]["customJWTAuthorizer"]
     assert a["allowedClients"] == ["c1"] and "p1/.well-known" in a["discoveryUrl"]
+    it = next(i for i in db.list_items("agent") if i["name"] == "with_jwt_gw")
+    assert it["data"]["auth"] == "JWT" and it["data"]["jwt_mcp"] is True and it["data"]["mcp_ids"] == [mid]
+    user = auth.User("a@x.com", "N", "", "user")
+    tools = agent_create.invoke_tools([mid], user, "TOK")
+    assert tools[0]["type"] == "remote_mcp"
+    assert tools[0]["config"]["remoteMcp"]["headers"]["Authorization"] == "Bearer TOK"
+
+
+def test_jwt_auth_requires_cognito(env, monkeypatch):
+    assert post(client(), name="jwt_auth_a", auth="JWT").status_code == 503
+    monkeypatch.setattr(mcp_token, "settings", lambda: {"pool": "p1", "client": "c1", "region": "us-east-1"})
+    assert post(client(), name="jwt_auth_b", auth="JWT").status_code == 200
 
 
 def test_registry_prompt_used(env, monkeypatch):
@@ -112,4 +134,4 @@ def test_admin_can_delete_and_synced_harness_is_left_alone(env, monkeypatch):
     iid = post(client("a@x.com")).json()["id"]
     assert client("e2npark@gmail.com").delete(f"/api/catalog/agent/{iid}").status_code == 200 and deleted == ["h-1"]
     sid = db.insert_item("agent", "synced", "", "a@x.com", {"agent_type": "harness"}, source="aws", ext_id="harness:zzz")
-    assert client("a@x.com").delete(f"/api/catalog/agent/{sid}").status_code == 200 and deleted == ["h-1"]
+    assert client("a@x.com").delete(f"/api/catalog/agent/{sid}").status_code == 200 and deleted == ["h-1"]  # synced harness 는 AWS 삭제 안 함

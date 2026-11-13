@@ -36,8 +36,9 @@ from botocore.exceptions import BotoCoreError, ClientError, WaiterError
 # ── Configuration (installer.py 와 같아야 한다) ─────────────────────
 project_name = "ai-portal"
 region = "us-west-2"
-WEBSEARCH_REGION = "us-east-1"            # websearch gateway · Cognito 의 리전
-COGNITO_REGION = WEBSEARCH_REGION
+WEBSEARCH_REGION = "us-west-2"            # gw-websearch (예전 us-east-1 → us-west-2)
+COGNITO_REGION = "us-east-1"              # Cognito 사용자 풀 리전
+OLD_WEBSEARCH_REGION = "us-east-1"        # 예전 gw-websearch-jwt/iam 이 있던 리전
 DOMAIN = "portal.my-agentic-ai.click"
 DNS_PROFILE = "stock"                     # 이 도메인의 Route53 호스팅 영역이 있는 AWS CLI 프로파일
 DNS_ZONE_NAME = "my-agentic-ai.click."
@@ -60,10 +61,11 @@ SSM_PARAMS = [f"/{project_name}/admins", f"/{project_name}/reviewers", f"/{proje
 GATEWAYS = [(f"gw-{project_name}-jwt", region),
             (f"gw-{project_name}-iam", region),
             (f"gw-{project_name}", region),
-            ("gw-websearch-jwt", WEBSEARCH_REGION),
-            ("gw-websearch-iam", WEBSEARCH_REGION),
-            (f"gw-{project_name}-websearch-jwt", WEBSEARCH_REGION),     # 예전 이름(남아 있으면 같이 지운다)
-            (f"gw-{project_name}-websearch-iam", WEBSEARCH_REGION)]
+            ("gw-websearch", WEBSEARCH_REGION),
+            ("gw-websearch-jwt", OLD_WEBSEARCH_REGION),
+            ("gw-websearch-iam", OLD_WEBSEARCH_REGION),
+            (f"gw-{project_name}-websearch-jwt", OLD_WEBSEARCH_REGION),     # 예전 이름(남아 있으면 같이 지운다)
+            (f"gw-{project_name}-websearch-iam", OLD_WEBSEARCH_REGION)]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("uninstaller")
@@ -503,7 +505,7 @@ def delete_roles() -> None:
     logger.info("[I] IAM 역할")
     names = [f"role-ecs-task-for-{project_name}-{region}", f"role-ecs-execution-for-{project_name}-{region}",
              f"role-harness-for-{project_name}-{region}", f"role-firehose-for-{project_name}-{region}", NOTIFY_ROLE]
-    for rgn in sorted({region, WEBSEARCH_REGION}):
+    for rgn in sorted({region, WEBSEARCH_REGION, OLD_WEBSEARCH_REGION}):
         names += [f"role-lambda-interceptor-for-{project_name}-{rgn}", f"role-gateway-for-{project_name}-{rgn}"]
     for name in names:
         def go(name=name) -> None:

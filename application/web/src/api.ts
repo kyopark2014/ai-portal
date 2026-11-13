@@ -214,6 +214,7 @@ export const setPolicy = (body: Partial<Pick<Policy, "auto_approval" | "auto_rev
 // ── MCP·Agent 사용 신청 ──
 export interface UsageState {
   applicable: boolean; registered?: boolean; can_use?: boolean; can_request?: boolean;
+  usage_free?: boolean;   // IAM MCP 등 사용 신청 불필요
   status?: "NONE" | "PENDING" | "APPROVED" | "REJECTED"; reason?: string;
 }
 export interface UsageRequest {
@@ -236,6 +237,8 @@ export interface AgentCreateBody {
   mcp_ids: number[]; skill_ids: number[]; auth: "IAM" | "JWT"; description?: string;
 }
 export const createAgent = (body: AgentCreateBody) => callErr<Item & { registry_error?: string }>("/api/agents/create", json("POST", body));
+/** 에이전트 생성용 MCP(승인 필요 runtime 제외, Gateway 는 data.targets 포함). */
+export const getAgentMcps = () => callErr<{ items: Item[] }>("/api/agents/mcps").then((r) => r.items);
 
 // ── runtime MCP 승인 프로세스 / JWT Gateway ──
 export const listJwtGateways = () => callErr<{ items: Item[] }>("/api/gateways/jwt").then((r) => r.items);

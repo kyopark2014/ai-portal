@@ -47,7 +47,8 @@ POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")        # 토큰의 sub 로 
 POOL_REGION = os.environ.get("COGNITO_REGION", "") or "us-east-1"
 _clients: dict = {}
 _emails: dict = {}                                          # sub -> email (바뀌지 않으므로 캐시)
-_ids = {"at": 0.0, "map": {}}                               # gateway id -> 포털 MCP 항목 번호 (번호는 바뀌지 않아 잠깐 캐시)
+# map: gateway_id -> sk / targets: "gateway_id|target-name" -> sk (승인 필요 runtime)
+_ids = {"at": 0.0, "map": {}, "targets": {}}
 ID_CACHE_SECONDS = 60
 # ── 요청 로그(Firehose → S3 → Athena). 값이 없으면 기록하지 않는다 ──
 LOG_STREAM = os.environ.get("LOG_STREAM", "")                # Firehose delivery stream 이름
@@ -62,6 +63,11 @@ def _client(name: str, region: str):
         import boto3
         _clients[name] = boto3.client(name, region_name=region)
     return _clients[name]
+
+
+def _target_slug(name: str) -> str:
+    """포털 MCP 이름 → Gateway target 이름(영문·숫자·하이픈). aws.ensure_runtime_gateway_target 과 같다."""
+    return re.sub(r"[^A-Za-z0-9]+", "-", name or "").strip("-")[:100]
 
 
 def _email(claims: dict) -> str | None:
@@ -79,31 +85,31 @@ def _email(claims: dict) -> str | None:
 
 
 def _refresh_ids() -> None:
-    ddb, found, start = _client("dynamodb", TABLE_REGION), {}, None
+    ddb, gateways, targets, start = _client("dynamodb", TABLE_REGION), {}, {}, None
     while True:
         r = ddb.query(TableName=TABLE, KeyConditionExpression="pk = :p", ExpressionAttributeValues={":p": {"S": "ITEM#mcp"}},
-                      ProjectionExpression="sk, #d", ExpressionAttributeNames={"#d": "data"}, **({"ExclusiveStartKey": start} if start else {}))
+                      ProjectionExpression="sk, #n, #d", ExpressionAttributeNames={"#d": "data", "#n": "name"},
+                      **({"ExclusiveStartKey": start} if start else {}))
         for it in r.get("Items", []):
             try:
                 d = json.loads(it.get("data", {}).get("S") or "{}")
             except ValueError:
                 continue
+            sk = it["sk"]["S"]
             if d.get("kind") == "gateway" and d.get("gateway_id"):
-                found[d["gateway_id"]] = it["sk"]["S"]
+                gateways[d["gateway_id"]] = sk
+            elif d.get("kind") == "runtime" and d.get("approval_required") and d.get("approval_gateway_id"):
+                slug = _target_slug(it.get("name", {}).get("S") or "")
+                if slug:
+                    targets[f"{d['approval_gateway_id']}|{slug}"] = sk
         start = r.get("LastEvaluatedKey")
         if not start:
             break
-    _ids["map"], _ids["at"] = found, time.time()
+    _ids["map"], _ids["targets"], _ids["at"] = gateways, targets, time.time()
 
 
-def _gateway_item(gw: str) -> dict | None:
-    """이 gateway 의 포털 MCP 항목(승인자 목록 포함)을 지금 읽는다. 승인 취소가 바로 반영되도록 항목 내용은 캐시하지 않는다."""
-    age = time.time() - _ids["at"]
-    if gw not in _ids["map"] and age > MISS_REFRESH_SECONDS or age > ID_CACHE_SECONDS:
-        _refresh_ids()
-    sk = _ids["map"].get(gw)
-    if not sk:
-        return None
+def _load_item(sk: str) -> dict | None:
+    """MCP 항목 sk 로 승인자 목록을 지금 읽는다. 승인 취소가 바로 반영되도록 내용은 캐시하지 않는다."""
     r = _client("dynamodb", TABLE_REGION).get_item(TableName=TABLE, ConsistentRead=True, Key={"pk": {"S": "ITEM#mcp"}, "sk": {"S": sk}})
     it = r.get("Item")
     if not it:
@@ -117,15 +123,64 @@ def _gateway_item(gw: str) -> dict | None:
             "approved": {u.lower() for u in users if isinstance(u, str)} if isinstance(users, list) else set()}
 
 
-def _is_approved(claims: dict, gw: str) -> bool:
-    """토큰의 사용자가 이 gateway(MCP)의 승인자 목록(MCP 항목의 data.approved_users)에 있는가. 소유자도 예외 없이 승인이 필요하다(포털과 같은 기준).
-    무엇이든 확인하지 못하면 False(fail-closed)."""
+def _maybe_refresh(gw: str, target: str = "") -> None:
+    age = time.time() - _ids["at"]
+    need = age > ID_CACHE_SECONDS
+    if not need and gw and gw not in _ids["map"] and age > MISS_REFRESH_SECONDS:
+        need = True
+    if not need and target and f"{gw}|{target}" not in _ids.get("targets", {}) and age > MISS_REFRESH_SECONDS:
+        need = True
+    if need:
+        _refresh_ids()
+
+
+def _gateway_item(gw: str) -> dict | None:
+    _maybe_refresh(gw)
+    sk = _ids["map"].get(gw)
+    return _load_item(sk) if sk else None
+
+
+def _target_item(gw: str, target: str) -> dict | None:
+    """승인 필요 runtime 이 이 gateway target 으로 묶여 있으면 그 MCP 항목. 없으면 None(gateway 기본 target)."""
+    if not target:
+        return None
+    _maybe_refresh(gw, target)
+    sk = (_ids.get("targets") or {}).get(f"{gw}|{target}")
+    return _load_item(sk) if sk else None
+
+
+def _any_target_approved(gw: str, email: str) -> bool:
+    """이 gateway 에 묶인 승인 필요 runtime 중 하나라도 이 사용자가 승인됐는가(tools/list 용)."""
+    _maybe_refresh(gw)
+    prefix = f"{gw}|"
+    for key, sk in list((_ids.get("targets") or {}).items()):
+        if not key.startswith(prefix):
+            continue
+        item = _load_item(sk)
+        if item and email in item["approved"]:
+            return True
+    return False
+
+
+def _is_approved(claims: dict, gw: str, target: str = "") -> bool:
+    """토큰 사용자가 이 요청을 쓸 수 있는가.
+    tools/call 의 target 이 승인 필요 runtime 이면 그 runtime 의 approved_users 만 본다.
+    그 외(knowledge-mcp·tools/list 등)는 gateway 의 approved_users(또는 묶인 runtime 승인)를 본다.
+    소유자도 예외 없이 승인 필요. 확인 못하면 False(fail-closed)."""
     try:
-        item = _gateway_item(gw)
         email = _email(claims)
-        if not item or not email:
+        if not email:
             return False
-        return email in item["approved"]
+        if target:
+            bound = _target_item(gw, target)
+            if bound is not None:
+                return email in bound["approved"]
+        item = _gateway_item(gw)
+        if item and email in item["approved"]:
+            return True
+        if not target:                                         # tools/list 등: runtime 만 승인된 사용자도 목록은 볼 수 있다
+            return _any_target_approved(gw, email)
+        return False
     except Exception as e:  # noqa: BLE001  (조회 실패·권한·네트워크 모두 거절)
         log.warning(json.dumps({"interceptor": "ai-portal", "approval_lookup_failed": type(e).__name__}))
         return False
@@ -138,11 +193,21 @@ def _gateway_id(mcp: dict) -> str:
     return host.split(".")[0] if isinstance(host, str) else ""
 
 
+def _rpc_target(rpc: dict) -> str:
+    """tools/call 의 Gateway tool 이름(`<target>___<tool>`)에서 target. 없으면 ''."""
+    if (rpc.get("method") or "") != "tools/call":
+        return ""
+    params = rpc.get("params") if isinstance(rpc.get("params"), dict) else {}
+    name = params.get("name") if isinstance(params.get("name"), str) else ""
+    return name.partition("___")[0] if "___" in name else ""
+
+
 def decide(point: str, rpc: dict, mcp: dict | None = None) -> dict:
     """흐름을 허용할지 판단한다. 반환: {"action": "accept"} 또는 {"action": "block", "message": "..."}.
 
-    JWT 인증 gateway: 토큰으로 사용자를 알아낸 뒤, 포털이 MCP 항목에 기록한 승인자 목록(data.approved_users)에 들어 있어야 한다(소유자도 통과).
-    없거나 확인할 수 없으면 거절(fail-closed). 포털에서 승인을 취소하면 이미 발급된 토큰도 바로 거절된다. Cognito 그룹은 보지 않는다.
+    JWT 인증 gateway: 토큰으로 사용자를 알아낸 뒤, 호출 target 별 승인자 목록(data.approved_users)을 본다.
+    승인 필요 runtime(target)이면 그 MCP 승인만, 아니면 gateway(또는 묶인 runtime) 승인.
+    없거나 확인할 수 없으면 거절(fail-closed). Cognito 그룹은 보지 않는다.
     IAM 인증 gateway(토큰이 없고 context.identity 가 있음)는 이 검사 대상이 아니다.
     """
     mcp = mcp or {}
@@ -157,7 +222,7 @@ def decide(point: str, rpc: dict, mcp: dict | None = None) -> dict:
     if (rpc.get("method") or "") in OPEN_METHODS:
         return {"action": "accept"}
     gw = _gateway_id(mcp)
-    if gw and _is_approved(claims, gw):
+    if gw and _is_approved(claims, gw, _rpc_target(rpc)):
         return {"action": "accept"}
     return {"action": "block", "message": "이 MCP 서버의 사용이 승인되지 않았습니다. 포털에서 사용 신청 후 승인을 받으세요"}
 

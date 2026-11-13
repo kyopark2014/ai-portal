@@ -236,7 +236,12 @@ td .hint{margin:.1rem 0 0}
 .list-table td:nth-child(5) .badge{margin-left:0}
 .list-table .acts{display:flex;gap:.8rem;justify-content:flex-end}
 
-/* MCP 접속 토큰 */
+/* 에이전트 생성 · Gateway 연결 MCP */
+.mcp-pick-jwt{border:1px solid rgba(15,110,106,.28);border-radius:10px;padding:.55rem .7rem;background:rgba(15,110,106,.04)}
+.mcp-targets{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem;margin-top:.45rem}
+.mcp-targets-lbl{font-size:.72rem;font-weight:700;color:var(--teal);letter-spacing:.02em;margin-right:.15rem}
+.badge.mcp-target{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78rem;font-weight:700;padding:.25rem .65rem;border-radius:6px;background:#e3eaee;color:var(--ink)}
+.badge.mcp-target-jwt{background:rgba(15,110,106,.16);color:var(--teal);border:1px solid rgba(15,110,106,.35)}
 
 /* 로그 확인 */
 .check{display:flex;align-items:center;gap:.5rem;font-size:.9rem;margin:.2rem 0}

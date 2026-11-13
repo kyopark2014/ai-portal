@@ -14,7 +14,7 @@ export const KINDS: { kind: Kind; label: string; icon: string; blurb: string }[]
 
 /** 카드 배지: Registry 상태를 사람이 읽는 말로. APPROVED 는 '등록'(등록 승인 완료)이다. */
 export function statusText(st: string | null, usable?: boolean): string {
-  if (st === "APPROVED" && usable) return "사용 가능";      // MCP: 등록 후 사용이 승인된(또는 소유자인) 경우
+  if (st === "APPROVED" && usable) return "사용 가능";      // 사용 승인·IAM MCP·Skill/Prompt(등록만) 등
   return ({ APPROVED: "등록", PENDING_APPROVAL: "승인 대기", DRAFT: "초안", REJECTED: "거절됨", DEPRECATED: "Deprecated", CREATING: "등록 중", UPDATING: "갱신 중" } as Record<string, string>)[st ?? ""] ?? (st ?? "");
 }
 
@@ -205,7 +205,6 @@ export default function Explore({ user }: { user: User }) {
               </div>
               <footer>
                 <span title="상태가 바뀐 시각">{ago(it.status_at ?? it.updated_at)}</span>
-                {it.kind === "mcp" && it.data.kind === "runtime" && it.data.approval_required && <span className="badge st-PENDING_APPROVAL">승인 필요</span>}
                 {it.registry_status && <span className={`badge st-${it.registry_status}`}>{statusText(it.registry_status, it.usable)}</span>}
               </footer>
             </article>
@@ -222,10 +221,7 @@ export default function Explore({ user }: { user: User }) {
               <td className="ds"><div className="clip2" title={it.description}>{it.description || <em>설명 없음</em>}</div>
                 <div className="hint mono sm clip">{subtitle(it)}</div></td>
               <td className="nw">{ago(it.status_at ?? it.updated_at)}</td>
-              <td className="nw">
-                {it.kind === "mcp" && it.data.kind === "runtime" && it.data.approval_required && <span className="badge st-PENDING_APPROVAL">승인 필요</span>}
-                {it.registry_status && <span className={`badge st-${it.registry_status}`}>{statusText(it.registry_status, it.usable)}</span>}
-              </td>
+              <td className="nw">{it.registry_status && <span className={`badge st-${it.registry_status}`}>{statusText(it.registry_status, it.usable)}</span>}</td>
               <td className="nw"><div className="acts">
                 <button type="button" className="link" onClick={() => setOpen(it)}>Open</button>
                 {isAdmin && it.registry_record_id && <button type="button" className="link" onClick={() => setReviewerFor(it)}>Add reviewer</button>}

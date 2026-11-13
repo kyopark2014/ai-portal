@@ -364,6 +364,14 @@ def get_gateway(gateway_id: str, reg: str | None = None) -> dict:
         gatewayIdentifier=gateway_id)
 
 
+def list_gateway_target_names(gateway_id: str, reg: str | None = None) -> list[str]:
+    """Gateway 에 붙은 target 이름 목록(예: knowledge-mcp, hr-advisor)."""
+    if not gateway_id:
+        return []
+    c = boto3.client("bedrock-agentcore-control", region_name=reg or region(), config=_cfg)
+    return [t["name"] for t in c.list_gateway_targets(gatewayIdentifier=gateway_id).get("items", []) if t.get("name")]
+
+
 # ── Registry ────────────────────────────────────────────────────────
 def slug(name: str, maxlen: int = 64) -> str:
     s = re.sub(r"[^A-Za-z0-9_]+", "_", name).strip("_") or "item"

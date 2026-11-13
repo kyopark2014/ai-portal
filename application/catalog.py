@@ -78,12 +78,15 @@ def _view(item: dict, user: auth.User) -> dict:
     out = {**item, "can_edit": _can_edit(user, item)}
     # status_at: 카드에 보여줄 '상태가 바뀐 시각'. 동기화·새로고침으로 갱신되는 updated_at 은 쓰지 않는다.
     out["status_at"] = item.get("status_changed_at") or item.get("created_at")
-    if item["kind"] in ("mcp", "agent") and item.get("registry_status") == "APPROVED":
-        from . import usage                      # 순환 import 회피: usage 가 catalog 를 쓴다
-        ok, since = usage.usable_since(item, user)
-        out["usable"] = ok                       # 카드 배지 '사용 가능' 용
-        if ok and since:
-            out["status_at"] = since             # 사용 신청이 승인된 시각
+    if item.get("registry_status") == "APPROVED":
+        if item["kind"] in ("mcp", "agent"):
+            from . import usage                      # 순환 import 회피: usage 가 catalog 를 쓴다
+            ok, since = usage.usable_since(item, user)
+            out["usable"] = ok                       # 카드 배지 '사용 가능' 용
+            if ok and since:
+                out["status_at"] = since             # 사용 신청이 승인된 시각
+        elif item["kind"] in ("skill", "prompt"):
+            out["usable"] = True                     # Skill·Prompt 는 사용 신청 없음 · 등록만 되면 사용 가능
     return out
 
 

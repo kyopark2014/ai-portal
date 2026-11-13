@@ -25,7 +25,8 @@ def client(email="a@x.com"):
 
 def agent(data, name="ag", grant=True):
     iid = db.insert_item("agent", name, "", "a@x.com", data)
-    if grant:                                           # 소유자도 사용 신청이 승인되어야 대화할 수 있다
+    if grant:                                           # Registry 등록 + 사용 승인(JWT Agent 등)
+        db.update_item(iid, registry_id="REG", registry_record_id=f"recAg{iid:06d}", registry_status="APPROVED")
         db.put_usage_request(iid, "a@x.com", "PENDING"); db.put_usage_request(iid, "a@x.com", "APPROVED", decided_by="t")
     return iid
 
@@ -182,10 +183,37 @@ def test_jwt_harness_is_called_with_users_bearer_token(env, monkeypatch):
     seen = {}
     monkeypatch.setattr(mcp_token, "issue", lambda email: {"access_token": "TOK-" + email})
     monkeypatch.setattr(aws, "get_harness", lambda hid: {"status": "READY"})
-    monkeypatch.setattr(agent_test, "_harness_events", lambda arn, history, user, session, system=None, bearer=None: (seen.update(b=bearer), iter([{"t": "ok"}]))[1])
+    monkeypatch.setattr(agent_test, "_harness_events",
+                        lambda arn, history, user, session, system=None, bearer=None, tools=None:
+                        (seen.update(b=bearer, tools=tools), iter([{"t": "ok"}]))[1])
     iid = agent({"arn": HN, "agent_type": "harness", "auth": "JWT"})
     r = client().post(f"/api/agents/{iid}/chat", json=BODY)
     assert r.status_code == 200 and seen["b"] == "TOK-a@x.com" and "TOK-" not in r.text
+
+
+def test_jwt_gateway_mcp_injected_as_remote_mcp_on_invoke(env, monkeypatch):
+    """에이전트에 JWT Gateway MCP 가 있으면 호출마다 remote_mcp+Bearer 로 tools 를 넘긴다."""
+    from application import mcp_token
+    seen, granted = {}, []
+    mid = db.insert_item("mcp", "gw-jwt", "", "a@x.com",
+                         {"kind": "gateway", "authorizer": "CUSTOM_JWT", "gateway_id": "gw-j1",
+                          "endpoint": "https://j.example/mcp", "region": "us-west-2"})
+    db.update_item(mid, registry_id="REG", registry_record_id="recGwJwt01", registry_status="APPROVED")
+    db.put_usage_request(mid, "a@x.com", "PENDING"); db.put_usage_request(mid, "a@x.com", "APPROVED", decided_by="t")
+    monkeypatch.setattr(mcp_token, "grant", lambda email, gid: granted.append((email, gid)))
+    monkeypatch.setattr(mcp_token, "issue", lambda email: {"access_token": "TOK-" + email})
+    monkeypatch.setattr(aws, "get_harness", lambda hid: {"status": "READY"})
+    monkeypatch.setattr(agent_test, "_harness_events",
+                        lambda arn, history, user, session, system=None, bearer=None, tools=None:
+                        (seen.update(b=bearer, tools=tools), iter([{"t": "ok"}]))[1])
+    iid = agent({"arn": HN, "agent_type": "harness", "auth": "JWT", "mcp_ids": [mid], "jwt_mcp": True})
+    r = client().post(f"/api/agents/{iid}/chat", json=BODY)
+    assert r.status_code == 200, r.text
+    assert granted == [("a@x.com", "gw-j1")] and seen["b"] == "TOK-a@x.com"
+    t = seen["tools"][0]
+    assert t["type"] == "remote_mcp"
+    assert t["config"]["remoteMcp"]["url"] == "https://j.example/mcp"
+    assert t["config"]["remoteMcp"]["headers"]["Authorization"] == "Bearer TOK-a@x.com"
 
 
 def test_jwt_harness_unsigned_request_carries_authorization_header(env, monkeypatch):
@@ -208,7 +236,9 @@ def test_jwt_harness_unsigned_request_carries_authorization_header(env, monkeypa
 
 def test_empty_assistant_turns_are_dropped_and_empty_user_turns_refused(env, monkeypatch):
     seen = []
-    monkeypatch.setattr(agent_test, "_harness_events", lambda arn, history, *a, **k: (seen.append(history), iter([{"t": "ok"}]))[1])
+    monkeypatch.setattr(agent_test, "_harness_events",
+                        lambda arn, history, user, session, system=None, bearer=None, tools=None:
+                        (seen.append(history), iter([{"t": "ok"}]))[1])
     monkeypatch.setattr(aws, "get_harness", lambda hid: {"status": "READY"})
     iid = agent({"arn": HN, "agent_type": "harness"})
     msgs = [{"role": "user", "content": "q1"}, {"role": "assistant", "content": ""}, {"role": "user", "content": "q2"}]

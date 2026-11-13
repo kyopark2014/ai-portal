@@ -86,6 +86,42 @@ def test_non_mcp_items_have_no_usage_request_and_stay_open(env):
     assert usage.can_use(db.get_item(p), auth.User(USER, "N", "", "user")) is True
 
 
+def test_iam_runtime_and_iam_gateway_are_usage_free(env):
+    """IAM Gateway·IAM runtime(korea_weather 등)은 Registry 등록 후 사용 신청 없이 «사용 가능».
+    동기화만 된(Registry 미등록) IAM 항목은 사용 불가."""
+    from application import usage
+    synced = db.insert_item("mcp", "gateway-websearch", "", OWNER,
+                            {"kind": "gateway", "authorizer": "AWS_IAM", "gateway_id": "gw-sync", "endpoint": "https://s"})
+    u = auth.User(USER, "N", "", "user")
+    assert usage.usage_free(db.get_item(synced)) and not usage.can_use(db.get_item(synced), u)
+    rt = db.insert_item("mcp", "korea_weather", "", OWNER,
+                        {"kind": "runtime", "auth": "IAM", "approval_required": False, "endpoint": "https://w", "arn": "arn:x"})
+    db.update_item(rt, registry_id="REG", registry_record_id="recIAMRuntime1", registry_status="APPROVED")
+    gw = db.insert_item("mcp", "gw-websearch", "", OWNER,
+                        {"kind": "gateway", "authorizer": "AWS_IAM", "gateway_id": "gw-i", "endpoint": "https://g", "region": "us-west-2"})
+    db.update_item(gw, registry_id="REG", registry_record_id="recIAMGateway1", registry_status="APPROVED")
+    jwt_gw = db.insert_item("mcp", "gw-ai-portal", "", OWNER,
+                            {"kind": "gateway", "authorizer": "CUSTOM_JWT", "gateway_id": "gw-j", "endpoint": "https://j"})
+    db.update_item(jwt_gw, registry_id="REG", registry_record_id="recJWTGateway1", registry_status="APPROVED")
+    assert usage.usage_free(db.get_item(rt)) and usage.can_use(db.get_item(rt), u)
+    assert usage.usage_free(db.get_item(gw)) and usage.can_use(db.get_item(gw), u)
+    assert not usage.usage_free(db.get_item(jwt_gw)) and not usage.can_use(db.get_item(jwt_gw), u)
+    s = client(USER).get(f"/api/mcp/{rt}/usage").json()
+    assert s["can_use"] is True and s["usage_free"] is True and s["can_request"] is False
+    assert client(USER).post(f"/api/mcp/{rt}/usage").status_code == 409
+    items = client(USER).get("/api/catalog/mcp").json()["items"]
+    weather = next(i for i in items if i["name"] == "korea_weather")
+    assert weather["usable"] is True
+    sync_card = next(i for i in client(OWNER).get("/api/catalog/mcp").json()["items"] if i["name"] == "gateway-websearch")
+    assert sync_card.get("usable") is not True
+    direct = mcp()
+    assert client(USER).get(f"/api/mcp/{direct}/usage").json()["can_use"] is False
+    bound = db.insert_item("mcp", "hr", "", OWNER,
+                           {"kind": "runtime", "auth": "JWT", "approval_required": True, "approval_gateway_id": "gw-j", "endpoint": "https://h"})
+    db.update_item(bound, registry_id="REG", registry_record_id="recBoundHrAdv01", registry_status="APPROVED")
+    assert client(USER).get(f"/api/mcp/{bound}/usage").json()["can_use"] is False
+
+
 def test_rejection_requires_a_reason_and_allows_reapplying(env):
     i = mcp(); client(USER).post(f"/api/mcp/{i}/usage")
     assert client(ADMIN).post(f"/api/usage-requests/{i}/{USER}/decision", json={"decision": "REJECTED", "reason": " "}).status_code == 422

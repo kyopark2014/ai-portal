@@ -1,6 +1,7 @@
 """Agent 테스트: 선택한 agent 에 프롬프트를 보내고 응답/도구 호출을 SSE 로 중계한다.
 
-  - harness                → InvokeHarness  (messages 대화, 도구는 harness 에 설정된 것)
+  - harness                → InvokeHarness  (messages 대화).
+      create 때 bake 된 IAM/직접 MCP 도구 + 호출마다 넘기는 JWT Gateway(`remote_mcp`+Bearer).
   - runtime (HTTP/…)       → InvokeAgentRuntime. agentic-work 와 같은 payload 로 호출한다.
   - runtime (MCP 프로토콜) → 대화형 agent 가 아니라 MCP 서버라서 지원하지 않는다 (MCP 탭에서 테스트).
   - harness 가 만든 내부 runtime(harness_*) 은 직접 호출할 수 없다 (동기화에서 제외).
@@ -21,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import auth, aws, catalog, db, mcp_test, mcp_token, usage
+from . import agent_create, auth, aws, catalog, db, mcp_test, mcp_token, usage
 
 router = APIRouter(prefix="/api")
 MAX_TURNS = 20
@@ -137,8 +138,10 @@ def _runtime_events(arn: str, payload: bytes, session: str, user: auth.User) -> 
 
 
 def _harness_events(arn: str, history: list[dict], user: auth.User, session: str,
-                    system: list[dict] | None = None, bearer: str | None = None) -> Iterator[dict]:
-    """bearer 가 있으면 JWT 인증 harness: SigV4 서명을 끄고 Authorization: Bearer 헤더로 호출한다."""
+                    system: list[dict] | None = None, bearer: str | None = None,
+                    tools: list[dict] | None = None) -> Iterator[dict]:
+    """bearer 가 있으면 JWT 인증 harness: SigV4 서명을 끄고 Authorization: Bearer 헤더로 호출한다.
+    tools 가 있으면 이 호출에만 도구 목록을 덮어쓴다(JWT Gateway remote_mcp 주입)."""
     region = _region_of(arn)
     if bearer:
         rt = aws.boto3.client("bedrock-agentcore", region_name=region, config=Config(
@@ -149,6 +152,8 @@ def _harness_events(arn: str, history: list[dict], user: auth.User, session: str
         rt = aws.boto3.client("bedrock-agentcore", region_name=region, config=_cfg)
     msgs = [{"role": m["role"], "content": [{"text": m["content"]}]} for m in history]
     extra: dict[str, Any] = {"systemPrompt": system} if system else {}
+    if tools is not None:
+        extra["tools"] = tools
     if not bearer:                                  # JWT 호출의 사용자는 토큰이 정한다 (IAM 호출에서만 runtimeUserId 를 지정)
         extra["runtimeUserId"] = mcp_test.actor_id(user.email)
     r = rt.invoke_harness(harnessArn=arn, runtimeSessionId=session, actorId=mcp_test.actor_id(user.email),
@@ -181,15 +186,28 @@ def agent_events(it: dict, history: list[dict], session_id: str, user: auth.User
     호출 권한 검사는 호출한 쪽에서 끝낸 뒤 부른다. 준비 상태 검사처럼 시작 전에 알 수 있는 오류는 HTTPException 으로 **바로** 던진다
     (스트림이 시작되기 전이라 HTTP 상태로 알려진다). with_system=False 면 harness 에 systemPrompt 를 넘기지 않아 agent 자체의 prompt 를 쓴다(Playground)."""
     kind, arn = target_of(it)
-    jwt = kind == "harness" and (it["data"] or {}).get("auth") == "JWT"
-    bearer = mcp_token.issue(user.email)["access_token"] if jwt else None   # 이 요청에만 쓸 토큰 (저장·로그하지 않는다)
+    data = it["data"] or {}
+    mcp_ids = list(data.get("mcp_ids") or [])
+    # JWT harness 입구 또는 JWT Gateway 도구 → 실행자 Cognito 토큰이 필요하다
+    jwt_tools = bool(mcp_ids) and agent_create.mcp_needs_caller_jwt(mcp_ids, user)
+    need_jwt = kind == "harness" and (data.get("auth") == "JWT" or jwt_tools)
+    bearer = None
+    tools = None
+    if kind == "harness" and mcp_ids:
+        for gid in agent_create.jwt_gateway_ids_for(mcp_ids, user):
+            mcp_token.grant(user.email, gid)                     # 사용 승인된 사람만 여기까지 온다 → Cognito 그룹 맞춤
+        if need_jwt:
+            bearer = mcp_token.issue(user.email)["access_token"]  # 이 요청에만 쓸 토큰 (저장·로그하지 않는다)
+        tools = agent_create.invoke_tools(mcp_ids, user, bearer)
+    elif need_jwt:
+        bearer = mcp_token.issue(user.email)["access_token"]
     if kind == "harness":
         try:
             st = aws.get_harness(arn.split("/")[-1])["status"]
         except Exception:  # noqa: BLE001 — 상태를 못 읽으면 호출을 시도해 본다
             st = "READY"
-        if st != (it["data"] or {}).get("status"):                # 방금 읽은 상태를 화면에도 반영한다(CREATING 으로 남지 않게)
-            db.update_item(it["id"], data={**it["data"], "status": st})
+        if st != data.get("status"):                # 방금 읽은 상태를 화면에도 반영한다(CREATING 으로 남지 않게)
+            db.update_item(it["id"], data={**data, "status": st})
         if st != "READY":
             raise HTTPException(409, f"harness 가 아직 준비되지 않았습니다 (상태: {st}). 잠시 뒤 다시 시도하세요" if st in ("CREATING", "UPDATING")
                                 else f"harness 를 호출할 수 없는 상태입니다 ({st})")
@@ -197,7 +215,7 @@ def agent_events(it: dict, history: list[dict], session_id: str, user: auth.User
     # 사용자별로 세션을 분리해 다른 사용자의 agent 세션/메모리를 재사용하지 못하게 한다
     session = f"{uuid.uuid5(uuid.NAMESPACE_URL, user.email)}-{session_id}"[:100]
     if kind == "harness":
-        return _harness_events(arn, history, user, session, system, bearer)
+        return _harness_events(arn, history, user, session, system, bearer, tools)
     return _runtime_events(arn, _runtime_payload(history[-1]["content"], history, user, session), session, user)
 
 

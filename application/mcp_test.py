@@ -4,8 +4,8 @@ harness `ai_portal`(installer.py --harness-only)의 InvokeHarness 를 호출하�
 테스트 대상 MCP 를 지정한다. 스트림의 텍스트와 도구 호출/결과를 SSE 로 중계한다.
 
   - Gateway(IAM)   → agentcore_gateway 도구 (harness 실행 역할이 SigV4 로 호출)
+  - Gateway(JWT)   → remote_mcp + Authorization: Bearer (포털이 실행자 Cognito 토큰 발급)
   - 직접 등록 MCP  → remote_mcp 도구 (url + 사용자가 입력한 헤더)
-Gateway 중 CUSTOM_JWT 인증은 지원하지 않는다(토큰이 필요).
 """
 from __future__ import annotations
 
@@ -60,9 +60,10 @@ def tool_for(item: dict, bearer: str | None = None) -> dict:
             if not bearer:
                 raise HTTPException(422, "JWT 인증 MCP 를 테스트하려면 접속 토큰이 필요합니다")
             return {"type": "remote_mcp", "name": name, "config": {"remoteMcp": {"url": d["endpoint"], "headers": {"Authorization": f"Bearer {bearer}"}}}}
-        gid = catalog.config_value("gateway_iam_id")      # IAM runtime: IAM Gateway 의 target 으로 붙여 gateway 도구로 호출한다
+        gid = catalog.config_value("gateway_iam_id")      # 승인 불필요 IAM runtime: 레거시 포털 IAM Gateway target 경유
         if not gid:
-            raise HTTPException(503, "IAM Gateway(gateway_iam_id)가 설정되어 있지 않습니다")
+            raise HTTPException(503, "포털 IAM Gateway(gateway_iam_id)가 없습니다. 승인 프로세스로 JWT Gateway 에 묶거나, "
+                                     "에이전트에는 JWT Gateway MCP 를 쓰세요(installer 는 gw-ai-portal-iam 을 만들지 않습니다)")
         arn = f"arn:aws:bedrock-agentcore:{aws.region()}:{aws.account_id()}:gateway/{gid}"
         return {"type": "agentcore_gateway", "name": name, "config": {"agentCoreGateway": {"gatewayArn": arn}}}
     if d.get("kind") == "gateway" and d.get("authorizer") == "CUSTOM_JWT":

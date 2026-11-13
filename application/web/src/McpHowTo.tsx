@@ -96,36 +96,6 @@ with mcp:
 /** 서버 이름: 영문·숫자·_- 만 (CLI 인자로 안전하게). */
 const slug = (n: string) => n.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "mcp-server";
 
-/** runtime MCP → 승인 필요면 JWT Gateway, 불필요면 자신의 runtime endpoint 기준으로 가이드 항목을 만든다. */
-function resolveGuide(item: Item): { item: Item; blocked?: string; lead?: string } {
-  const d = item.data;
-  if (d.kind !== "runtime") return { item };
-  if (d.approval_required) {
-    if (!d.approval_gateway_id || !d.approval_gateway_endpoint) {
-      return { item, blocked: "승인 프로세스용 JWT Gateway 를 먼저 연결하세요. 연결 후 그 Gateway 를 MCP 로 등록하는 방법이 표시됩니다." };
-    }
-    return {
-      item: {
-        ...item,
-        name: d.approval_gateway_name || item.name,
-        data: { ...d, kind: "gateway", authorizer: "CUSTOM_JWT", endpoint: d.approval_gateway_endpoint, gateway_id: d.approval_gateway_id },
-      },
-      lead: `승인 필요 — JWT Gateway "${d.approval_gateway_name || d.approval_gateway_id}" 를 MCP 로 등록하세요.`,
-    };
-  }
-  // 승인 불필요: 자신의 runtime MCP endpoint 를 직접 등록
-  if (d.auth === "JWT") {
-    return {
-      item: { ...item, data: { ...d, kind: "gateway", authorizer: "CUSTOM_JWT", endpoint: d.endpoint } },
-      lead: "승인 불필요 — 이 runtime MCP 를 직접 등록하세요 (Cognito JWT).",
-    };
-  }
-  return {
-    item: { ...item, data: { ...d, kind: "gateway", authorizer: "AWS_IAM", endpoint: d.endpoint } },
-    lead: "승인 불필요 — 이 runtime MCP 를 직접 등록하세요 (IAM SigV4).",
-  };
-}
-
 function build(tool: Tool, item: Item, clientId: string, domain: string): { code: string; lang: string; notes: string[] } {
   const d = item.data, name = slug(item.name), url = d.endpoint || "<MCP_ENDPOINT>";
   const jwt = d.kind === "gateway" && d.authorizer === "CUSTOM_JWT";
@@ -164,28 +134,22 @@ export default function McpHowTo({ item }: { item: Item }) {
   const [domain, setDomain] = useState("");
   const [copied, setCopied] = useState(false);
   useEffect(() => { api.getConfig().then((c) => { setClientId(c.cognitoClientId ?? ""); setDomain(c.cognitoDomain ?? ""); }).catch(() => {}); }, []);
-  const guide = resolveGuide(item);
-  const ex = tool && !guide.blocked ? build(tool, guide.item, clientId, domain) : null;
+  const ex = tool ? build(tool, item, clientId, domain) : null;
   return (
     <>
       <h3>사용 방법</h3>
-      {guide.lead && <p className="hint">{guide.lead}</p>}
-      {guide.blocked ? (
-        <p className="note" role="status">{guide.blocked}</p>
-      ) : (<>
-        <div className="actions left" role="group" aria-label="사용 방법 선택">
-          {TOOLS.map((t) => (
-            <button key={t.id} type="button" className={`btn ${tool === t.id ? "" : "ghost"}`} aria-pressed={tool === t.id}
-                    onClick={() => { setTool(tool === t.id ? null : t.id); setCopied(false); }}>{t.label}</button>
-          ))}
-        </div>
-        {ex && (<>
-          <pre className="code">{ex.code}</pre>
-          <div className="actions left"><button type="button" className="btn ghost" onClick={() => {
-            navigator.clipboard?.writeText(ex.code).then(() => setCopied(true)).catch(() => {});
-          }}>{copied ? "복사했습니다" : "복사"}</button></div>
-          {ex.notes.map((n, i) => <p key={i} className="hint">{n}</p>)}
-        </>)}
+      <div className="actions left" role="group" aria-label="사용 방법 선택">
+        {TOOLS.map((t) => (
+          <button key={t.id} type="button" className={`btn ${tool === t.id ? "" : "ghost"}`} aria-pressed={tool === t.id}
+                  onClick={() => { setTool(tool === t.id ? null : t.id); setCopied(false); }}>{t.label}</button>
+        ))}
+      </div>
+      {ex && (<>
+        <pre className="code">{ex.code}</pre>
+        <div className="actions left"><button type="button" className="btn ghost" onClick={() => {
+          navigator.clipboard?.writeText(ex.code).then(() => setCopied(true)).catch(() => {});
+        }}>{copied ? "복사했습니다" : "복사"}</button></div>
+        {ex.notes.map((n, i) => <p key={i} className="hint">{n}</p>)}
       </>)}
     </>
   );

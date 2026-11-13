@@ -123,7 +123,8 @@ def verify_google_credential(credential: str) -> dict:
     if not cid:
         raise AuthError("GOOGLE_CLIENT_ID not configured")
     try:
-        claims = g_id_token.verify_oauth2_token(credential, g_requests.Request(), cid)
+        claims = g_id_token.verify_oauth2_token(
+            credential, g_requests.Request(), cid, clock_skew_in_seconds=10)
     except ValueError as e:
         raise AuthError(f"invalid google token: {e}") from e
     if not claims.get("email") or claims.get("email_verified") is not True:

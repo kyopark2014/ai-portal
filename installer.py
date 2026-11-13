@@ -11,14 +11,14 @@
   7. ECS Fargate         cluster / task / service (desired=1)
   8. CloudFront          https 진입점 (*.cloudfront.net)
   +  Harness agent       `ai_portal` (MCP 테스트용. AgentCore Harness + 전용 실행 역할)
-  +  HR Advisor          Aurora DB + MCP Runtime → `gw-ai-portal-jwt`·`gw-ai-portal-iam` target (`runtime/installer_hr.py`)
+  +  HR Advisor          Aurora DB + MCP Runtime → `gw-ai-portal` target (`runtime/installer_hr.py`)
 
 사용:
   python installer.py --registry-only       # Registry 만 생성
   python installer.py --notifications-only  # 승인 요청 메일 알림(SNS + EventBridge)만 구성
   python installer.py --harness-only        # MCP 테스트용 harness agent `ai_portal` 만 생성
-  python installer.py --gateway-only        # AgentCore Gateway `gw-ai-portal-jwt`·`gw-ai-portal-iam`·`gw-websearch-jwt`·`gw-websearch-iam` (+ target, interceptor Lambda) 만 생성
-  python installer.py --hr-only             # Aurora + HR Advisor MCP Runtime(+ gw-ai-portal-jwt/iam target)만 구성
+  python installer.py --gateway-only        # AgentCore Gateway `gw-ai-portal`·`gw-websearch` (+ target, interceptor Lambda) 만 생성
+  python installer.py --hr-only             # Aurora + HR Advisor MCP Runtime(+ gw-ai-portal target)만 구성
   python installer.py                       # 전체 설치
   python installer.py --skip-docker-build   # 인프라만 갱신(ECR 최신 이미지 재사용)
   python installer.py --image-only          # 이미지 빌드/푸시 후 서비스 재배포
@@ -369,25 +369,21 @@ def gateway_name(rgn: str) -> str:
 
 
 GATEWAY_NAME = gateway_name(region)                           # gw-ai-portal (예전 이름. 이름은 바꿀 수 없어 옛 gateway 가 남아 있을 수 있다)
-# 포털 리전(us-west-2)의 gateway 두 개. target(knowledge-mcp · hr-advisor)은 같고 인증 방식만 다르다.
-#   gw-ai-portal-jwt : Cognito JWT 인증 (Claude Code 등 사용자 토큰으로 호출)  → config.json 의 gateway_*
-#   gw-ai-portal-iam : IAM(SigV4) 인증                                          → config.json 의 gateway_iam_*
-PORTAL_JWT_GATEWAY_NAME = f"gw-{project_name}-jwt"
-PORTAL_IAM_GATEWAY_NAME = f"gw-{project_name}-iam"
+# 포털 리전(us-west-2): JWT Gateway 만 만든다. (예전 `gw-ai-portal-jwt`·`gw-ai-portal-iam` 은 더 이상 생성하지 않는다.)
+#   gw-ai-portal : Cognito JWT 인증 (Claude Code·에이전트 호출 시 Bearer)  → config.json 의 gateway_*
+PORTAL_JWT_GATEWAY_NAME = f"gw-{project_name}"             # = GATEWAY_NAME (gw-ai-portal)
 TARGET_NAME = "knowledge-mcp"                              # gw-ai-portal 의 기본 MCP server target (AWS Knowledge MCP)
 INTERCEPTOR_FUNCTION = f"lambda-{project_name}-intercepter"   # lambda-ai-portal-intercepter (이름 철자는 요청대로)
 # IAM 역할은 전역이라 이름에 리전을 넣는다(리전마다 따로). us-west-2 의 기존 이름은 그대로다.
 def interceptor_role_name(rgn: str) -> str: return f"role-lambda-interceptor-for-{project_name}-{rgn}"
 def gateway_role_name(rgn: str) -> str: return f"role-gateway-for-{project_name}-{rgn}"
-# web-search gateway 두 개(us-east-1, target 은 AWS 관리형 web-search connector, 둘 다 interceptor 사용). 인증 방식만 다르다.
-#   gw-websearch-jwt : Cognito JWT 인증 (Claude Code 등 사용자 토큰으로 호출)
-#   gw-websearch-iam : IAM(SigV4) 인증 (에이전트에 붙일 수 있는 gateway)
-WEBSEARCH_REGION = "us-east-1"
-WEBSEARCH_JWT_GATEWAY_NAME = "gw-websearch-jwt"
-WEBSEARCH_IAM_GATEWAY_NAME = "gw-websearch-iam"
-WEBSEARCH_TARGET_NAME = f"target-{project_name}-websearch"
-# 주의: gateway 이름은 UpdateGateway 로 바꿀 수 없다("Name cannot be updated"). 예전 이름(gw-ai-portal-websearch,
-# gw-ai-portal-us-west-2, gw-ai-portal-us-east-1)의 gateway 는 그대로 남으므로 필요 없으면 직접 지운다. 설치기는 새 이름으로 새로 만든다.
+# web-search gateway(AWS 관리형 web-search connector, IAM). us-west-2 도 지원하므로 포털과 같은 리전을 쓴다.
+# JWT 버전(`gw-websearch-jwt`)·예전 us-east-1(`gw-websearch-iam`)은 만들지 않는다.
+WEBSEARCH_REGION = "us-west-2"
+WEBSEARCH_GATEWAY_NAME = "gw-websearch"
+WEBSEARCH_TARGET_NAME = "websearch"
+# 주의: gateway 이름은 UpdateGateway 로 바꿀 수 없다("Name cannot be updated"). 예전 이름(gw-websearch-jwt·gw-websearch-iam·
+# target-ai-portal-websearch 등)은 그대로 남으므로 필요 없으면 직접 지운다. 설치기는 새 이름으로 새로 만든다.
 # target 이 가리킬 MCP 서버. 기본값은 인증이 필요 없는 AWS Knowledge MCP 서버 — .env 의 TARGET_MCP_ENDPOINT 로 바꾼다.
 DEFAULT_TARGET_ENDPOINT = "https://knowledge-mcp.global.api.aws"
 
@@ -598,7 +594,7 @@ def ensure_gateway(rgn: str = region, websearch: bool = False, cognito_jwt: bool
 
     name: gateway 이름(기본 `gw-<project>-<region>`). target: websearch=False → MCP server(`TARGET_MCP_ENDPOINT`),
     True → AWS web-search connector. config_prefix 를 주면 `config.json` 에 `<prefix>_id/arn/url/region/name/target_id` 로 기록한다
-    (포털 리전 gateway: jwt → `gateway`, iam → `gateway_iam`. websearch gateway 는 이름으로 AWS 에서 찾아 재사용하므로 두지 않는다)."""
+    (포털 리전 JWT gateway → `gateway_*`. websearch gateway 는 이름으로 AWS 에서 찾아 재사용하므로 두지 않는다)."""
     gw_name = name or gateway_name(rgn)
     jwt: Optional[Dict[str, Any]] = None
     if cognito_jwt:                                  # Cognito 앱 클라이언트가 발급한 토큰만 허용
@@ -669,16 +665,15 @@ def ensure_gateway(rgn: str = region, websearch: bool = False, cognito_jwt: bool
 
 
 def ensure_gateways(recreate: bool = False) -> None:
-    """gw-ai-portal-jwt (Cognito JWT) · gw-ai-portal-iam (IAM): 둘 다 MCP server target(knowledge-mcp),
-    gw-websearch-jwt (Cognito JWT) · gw-websearch-iam (IAM): 둘 다 web-search target."""
+    """gw-ai-portal (Cognito JWT, knowledge-mcp · hr-advisor),
+    gw-websearch (IAM, us-west-2, target `websearch`).
+    만들지 않는 것: `gw-ai-portal-iam`·`gw-ai-portal-jwt`·`gw-websearch-jwt`·`gw-websearch-iam`(us-east-1)."""
     ensure_gateway(region, cognito_jwt=True, name=PORTAL_JWT_GATEWAY_NAME, recreate=recreate, config_prefix="gateway")
-    ensure_gateway(region, cognito_jwt=False, name=PORTAL_IAM_GATEWAY_NAME, recreate=recreate, config_prefix="gateway_iam")
-    ensure_gateway(WEBSEARCH_REGION, websearch=True, cognito_jwt=True, name=WEBSEARCH_JWT_GATEWAY_NAME, recreate=recreate)
-    ensure_gateway(WEBSEARCH_REGION, websearch=True, cognito_jwt=False, name=WEBSEARCH_IAM_GATEWAY_NAME, recreate=recreate)
+    ensure_gateway(WEBSEARCH_REGION, websearch=True, cognito_jwt=False, name=WEBSEARCH_GATEWAY_NAME, recreate=recreate)
 
 
 def ensure_hr_advisor(*, skip_docker: bool = False) -> Dict[str, str]:
-    """Aurora HR DB + HR Advisor MCP Runtime 을 만들고 `gw-ai-portal-jwt`·`gw-ai-portal-iam` target 으로 붙인다.
+    """Aurora HR DB + HR Advisor MCP Runtime 을 만들고 `gw-ai-portal` target 으로 붙인다.
 
     실제 로직은 `runtime/installer_hr.py` 에 있다. VPC(`vpc_id`)와 gateway(`gateway_id`)가
     config.json 에 있어야 한다.
@@ -695,7 +690,7 @@ def ensure_hr_advisor(*, skip_docker: bool = False) -> Dict[str, str]:
         raise RuntimeError(
             "gateway_id 가 없습니다. `python installer.py --gateway-only` 를 먼저 실행하세요."
         )
-    logger.info("HR Advisor: Aurora + MCP Runtime → gw-ai-portal-jwt/iam target")
+    logger.info("HR Advisor: Aurora + MCP Runtime → gw-ai-portal target")
     return installer_hr.ensure_all(skip_docker=skip_docker)
 
 
@@ -703,7 +698,7 @@ def ensure_hr_advisor(*, skip_docker: bool = False) -> Dict[str, str]:
 # 사용자가 포털에 Google 로그인하면 Cognito 사용자(federated)로 등록되고, Cognito 가 JWT 를 발급한다.
 # Gateway(CUSTOM_JWT)는 Cognito 의 discovery URL 로 토큰을 검증한다. 액세스 토큰은 최대 24시간이라 만료 없는 JWT 는 없고,
 # 대신 리프레시 토큰(최대 10년)으로 새 액세스 토큰을 받는다.
-COGNITO_REGION = WEBSEARCH_REGION                          # gateway 와 같은 리전(us-east-1)
+COGNITO_REGION = "us-east-1"                               # 사용자 풀 리전(포털 JWT Gateway 와 별개)
 COGNITO_POOL_NAME = f"{project_name}-users"
 COGNITO_CLIENT_NAME = f"{project_name}-mcp-client"
 ACCESS_TOKEN_HOURS = 24                                    # 액세스 토큰 최대(86400초)
