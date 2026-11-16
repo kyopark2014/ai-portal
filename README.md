@@ -24,44 +24,16 @@ Prompt · MCP · Agent · Skill 을 카탈로그로 탐색·등록하고, 등록
 
 ## 목차
 
-1. [로컬 실행](#로컬-실행) · [환경 변수](#환경-변수-envexample)
-2. [시스템 구성](#시스템-구성) — 아키텍처, 사용 승인 흐름, HR Advisor
-3. [기능](#기능) — 카탈로그·테스트·승인·관리
-4. [AgentCore Gateway Interceptor](#agentcore-gateway-interceptor) — JWT 인가·로깅
-5. [MCP - OAuth 인증](#mcp---oauth-인증) — Claude Code 등 클라이언트 접속
-6. [Agent의 생성](#agent의-생성) · [JWT Gateway](#agent에서-jwt방식-gateway-활용하기) · [Playground](#playground-playground)
-7. [AWS 리소스](#aws-리소스-installerpy) — installer · Cognito · Gateway
-8. [요청 로그](#요청-로그-관리자-로그-확인)
-9. [AgentCore Registry](#agentcore-registry) — AWS 제품 배경(포털 동작과의 관계)
-10. [API 요약](#api-요약) · [알아둘 제약](#알아둘-제약) · [로드맵](#로드맵)
-
-## 로컬 실행
-```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp .env.example .env     # GOOGLE_CLIENT_ID, LLM_GATEWAY_KEY 등 입력
-./run_local.sh           # http://localhost:8501  (프런트 빌드 + uvicorn)
-```
-- Google Cloud Console → OAuth client → **Authorized JavaScript origins** 에 `http://localhost`·`http://localhost:8501` 과 배포 오리진을 추가해야 로그인됩니다. (로컬 HTTP 에서는 Referrer-Policy 가 `no-referrer` 이면 GIS 로그인이 실패할 수 있어 `strict-origin-when-cross-origin` 을 씁니다.)
-- 프런트만 개발: `cd application/web && npm run dev` (:5173, `/api` 는 :8501 로 프록시)
-- 테스트: `pip install -r requirements-dev.txt && .venv/bin/python -m pytest` (테스트는 실제 AWS 를 호출하면 실패하도록 막혀 있음). 같은 전체 테스트를 DynamoDB 구현(moto)으로 돌리려면 `TEST_STORE=dynamodb pytest --ignore=tests/test_store_parity.py`. `test_store_parity.py` 는 두 저장소가 같은 결과를 내는지 직접 비교합니다.
-- AWS 자격 증명과 리전(`AWS_REGION`, 기본 `us-west-2`)이 필요합니다.
-
-## 환경 변수 (`.env.example`)
-| 변수 | 설명 |
-|---|---|
-| `GOOGLE_CLIENT_ID` | Google OAuth Web client ID (공개 값) |
-| `ADMIN_EMAILS` | 쉼표 구분 **최초 관리자** 이메일. 화면에서 지울 수 없습니다. 추가 관리자는 화면에서 관리하며 SSM `/ai-portal/admins` 에 저장됩니다 |
-| `SESSION_SIGNING_KEY` | 세션 쿠키 서명 키. 비우면 로컬에 자동 생성. ECS 는 Secrets Manager 로 주입 |
-| `COOKIE_SECURE` | https 뒤에서는 `1` |
-| `LLM_GATEWAY_URL` / `LLM_GATEWAY_KEY` | 프롬프트 테스트용 AWSome AI Gateway. 키는 서버에만 있고 브라우저로 나가지 않음 |
-| `HARNESS_ARN` | (선택) MCP 테스트 harness. 기본은 `application/config.json` 의 `harness_arn` |
-| `PORTAL_ORIGIN` | 승인 요청 메일의 링크 기준 주소(배포 오리진). 비우면 `config.json` 의 `sharing_url`, 없으면 `http://localhost:8501` |
-| `TARGET_MCP_ENDPOINT` | (installer) `gw-ai-portal` 의 target `knowledge-mcp` 가 가리킬 MCP 서버. https 필수, 기본 AWS Knowledge MCP |
-| `GATEWAY_REGIONS` | MCP Gateway 를 가져올 리전(쉼표 구분). 비우면 `AWS_REGION` + us-east-1 |
-| `REGISTRY_ID` | (선택) Registry 지정. 기본은 `application/config.json` 의 `registry_id` |
-| `PORTAL_STORE` | 기본 `dynamodb`(비워 두어도 DynamoDB — 빠뜨려도 조용히 SQLite 로 떨어지지 않게). `sqlite` 는 테스트 전용 |
-| `DDB_TABLE` | DynamoDB 테이블 이름(기본 `ai-portal`) |
-| `PORTAL_DB_PATH` | (테스트 전용) SQLite 파일 경로 |
+1. [시스템 구성](#시스템-구성) — 아키텍처, 사용 승인 흐름, HR Advisor
+2. [기능](#기능) — 카탈로그·테스트·승인·관리
+3. [AgentCore Gateway Interceptor](#agentcore-gateway-interceptor) — JWT 인가·로깅
+4. [MCP - OAuth 인증](#mcp---oauth-인증) — Claude Code 등 클라이언트 접속
+5. [Agent의 생성](#agent의-생성) · [JWT Gateway](#agent에서-jwt방식-gateway-활용하기) · [Playground](#playground-playground)
+6. [AWS 리소스](#aws-리소스-installerpy) — installer · Cognito · Gateway
+7. [요청 로그](#요청-로그-관리자-로그-확인)
+8. [AgentCore Registry](#agentcore-registry) — AWS 제품 배경(포털 동작과의 관계)
+9. [API 요약](#api-요약) · [알아둘 제약](#알아둘-제약) · [로드맵](#로드맵)
+10. [로컬 실행](#로컬-실행) · [환경 변수](#환경-변수-envexample)
 
 ## 시스템 구성
 
@@ -704,6 +676,34 @@ Publisher 에게 `UpdateRegistryRecordStatus` 를 주지 않으면 **자기 승�
 - **Agent 요청 로그** — MCP 는 수집·조회가 되지만 Agent(harness/runtime) 호출은 아직 기록하지 않음(`kind=agent` 파티션만 예약). 포털(`agent_test.agent_events`)이 Firehose 로 보내는 방식으로 추가 예정
 - 승인·삭제 같은 변경 이력을 한곳에서 보는 감사 화면 — 지금은 접속 기록(대시보드)과 MCP 요청 로그만 있음
 - 무중단 배포(태스크 2개 이상, `minimumHealthyPercent` 상향)
+
+## 로컬 실행
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cp .env.example .env     # GOOGLE_CLIENT_ID, LLM_GATEWAY_KEY 등 입력
+./run_local.sh           # http://localhost:8501  (프런트 빌드 + uvicorn)
+```
+- Google Cloud Console → OAuth client → **Authorized JavaScript origins** 에 `http://localhost`·`http://localhost:8501` 과 배포 오리진을 추가해야 로그인됩니다. (로컬 HTTP 에서는 Referrer-Policy 가 `no-referrer` 이면 GIS 로그인이 실패할 수 있어 `strict-origin-when-cross-origin` 을 씁니다.)
+- 프런트만 개발: `cd application/web && npm run dev` (:5173, `/api` 는 :8501 로 프록시)
+- 테스트: `pip install -r requirements-dev.txt && .venv/bin/python -m pytest` (테스트는 실제 AWS 를 호출하면 실패하도록 막혀 있음). 같은 전체 테스트를 DynamoDB 구현(moto)으로 돌리려면 `TEST_STORE=dynamodb pytest --ignore=tests/test_store_parity.py`. `test_store_parity.py` 는 두 저장소가 같은 결과를 내는지 직접 비교합니다.
+- AWS 자격 증명과 리전(`AWS_REGION`, 기본 `us-west-2`)이 필요합니다.
+
+## 환경 변수 (`.env.example`)
+| 변수 | 설명 |
+|---|---|
+| `GOOGLE_CLIENT_ID` | Google OAuth Web client ID (공개 값) |
+| `ADMIN_EMAILS` | 쉼표 구분 **최초 관리자** 이메일. 화면에서 지울 수 없습니다. 추가 관리자는 화면에서 관리하며 SSM `/ai-portal/admins` 에 저장됩니다 |
+| `SESSION_SIGNING_KEY` | 세션 쿠키 서명 키. 비우면 로컬에 자동 생성. ECS 는 Secrets Manager 로 주입 |
+| `COOKIE_SECURE` | https 뒤에서는 `1` |
+| `LLM_GATEWAY_URL` / `LLM_GATEWAY_KEY` | 프롬프트 테스트용 AWSome AI Gateway. 키는 서버에만 있고 브라우저로 나가지 않음 |
+| `HARNESS_ARN` | (선택) MCP 테스트 harness. 기본은 `application/config.json` 의 `harness_arn` |
+| `PORTAL_ORIGIN` | 승인 요청 메일의 링크 기준 주소(배포 오리진). 비우면 `config.json` 의 `sharing_url`, 없으면 `http://localhost:8501` |
+| `TARGET_MCP_ENDPOINT` | (installer) `gw-ai-portal` 의 target `knowledge-mcp` 가 가리킬 MCP 서버. https 필수, 기본 AWS Knowledge MCP |
+| `GATEWAY_REGIONS` | MCP Gateway 를 가져올 리전(쉼표 구분). 비우면 `AWS_REGION` + us-east-1 |
+| `REGISTRY_ID` | (선택) Registry 지정. 기본은 `application/config.json` 의 `registry_id` |
+| `PORTAL_STORE` | 기본 `dynamodb`(비워 두어도 DynamoDB — 빠뜨려도 조용히 SQLite 로 떨어지지 않게). `sqlite` 는 테스트 전용 |
+| `DDB_TABLE` | DynamoDB 테이블 이름(기본 `ai-portal`) |
+| `PORTAL_DB_PATH` | (테스트 전용) SQLite 파일 경로 |
 
 ---
 
