@@ -3,9 +3,7 @@
 AWS Agent Registry(Amazon Bedrock AgentCore)의 기능을 UI와 함께 보여주는 웹.
 Prompt · MCP · Agent · Skill 을 카탈로그로 탐색·등록하고, 등록 정보는 Agent Registry 로 관리합니다.
 
-배포 아키텍처 개요는 아래 그림과 같고, 상세는 [시스템 구성](#시스템-구성)을 참고하세요.
-
-<img width="1035" height="535" alt="image" src="https://github.com/user-attachments/assets/3def1f53-88aa-4694-805d-e4c6dc7f2d13" />
+상세는 [시스템 구성](#시스템-구성)을 참고하세요.
 
 
 - 구조: FastAPI REST(`/api/*`) + React(Vite) SPA, 한 컨테이너(:8501)로 ECS 배포 (agentic-work 방식)
