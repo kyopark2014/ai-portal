@@ -279,6 +279,32 @@ HARNESS_SYSTEM_PROMPT = (
     "당신은 MCP 서버/Gateway 의 도구를 시험하는 테스트 에이전트입니다. 사용자의 요청을 수행하기 위해 "
     "사용 가능한 도구를 호출하고, 어떤 도구를 어떤 인자로 호출했는지와 결과를 간결하게 알려 주세요. "
     "도구가 없거나 실패하면 그 사실과 오류 내용을 그대로 설명하세요.")
+DOC_SHARING_PROMPT = (
+    "## Artifact sharing (REQUIRED) — doc-sharing skill\n"
+    "- 결과 파일을 만들었다면 최종 답변 전에 반드시 **doc-sharing** skill의 share_artifact.py를 실행하세요.\n"
+    "- 로컬 경로(`/tmp/...`, `/mnt/workspace/...`)만 안내하는 것은 금지입니다.\n"
+    "- 스크립트가 반환한 `url`(presigned 다운로드 링크)을 최종 답변에 반드시 포함하세요.\n"
+    "- InvokeHarness 호출마다 systemPrompt 에 `actor_id` 와 `ARTIFACTS_DIR` 이 명시됩니다. "
+    "그 값을 그대로 쓰세요(닉네임·추측·빈 값 금지).\n")
+# agentcore-harness CreateHarness 한도와 동일
+HARNESS_MAX_ITERATIONS = 20
+HARNESS_MAX_TOKENS = 50000
+HARNESS_TIMEOUT_SECONDS = 300
+DOC_SHARING_SKILL_PREFIX = "skills/doc-sharing/"
+
+
+def get_max_output_tokens(model_id: str = "") -> int:
+    """Bedrock Anthropic Claude 모델별 출력 토큰 상한(agentcore-harness 와 동일)."""
+    mid = model_id.lower()
+    if "claude-opus-4-7" in mid or "claude-opus-4-6" in mid:
+        return 128000
+    if "claude-opus-4-5" in mid:
+        return 64000
+    if "claude-opus-4" in mid or "claude-4-opus" in mid:
+        return 128000
+    if "claude-sonnet-4" in mid or "claude-4-sonnet" in mid or "claude-haiku-4" in mid:
+        return 64000
+    return 8192
 
 
 def harness_api_name() -> str:
@@ -311,10 +337,17 @@ def create_harness_role() -> str:
             # MCP 테스트: harness 가 IAM(SigV4)으로 Gateway 를 호출한다. 이 계정의 Gateway 로 한정.
             {"Sid": "InvokeGateways", "Effect": "Allow", "Action": ["bedrock-agentcore:InvokeGateway"],
              "Resource": [f"arn:aws:bedrock-agentcore:*:{account_id}:gateway/*"]},
-            # Skill 테스트: harness 가 업로드된 skill zip 을 S3 에서 가져온다
+            # Skill 테스트·doc-sharing: skill 읽기 + 산출물 업로드/presign
             {"Sid": "ReadSkills", "Effect": "Allow", "Action": ["s3:GetObject", "s3:GetObjectVersion"],
              "Resource": [f"arn:aws:s3:::{BUCKET_NAME}/skills/*"]},
-            {"Sid": "ListSkills", "Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": [f"arn:aws:s3:::{BUCKET_NAME}"]},
+            {"Sid": "ShareArtifacts", "Effect": "Allow",
+             "Action": ["s3:PutObject", "s3:GetObject", "s3:GetObjectVersion", "s3:AbortMultipartUpload"],
+             "Resource": [
+                 f"arn:aws:s3:::{BUCKET_NAME}/artifacts/*",
+                 f"arn:aws:s3:::{BUCKET_NAME}/images/*",
+                 f"arn:aws:s3:::{BUCKET_NAME}/docs/*"]},
+            {"Sid": "ListBucket", "Effect": "Allow", "Action": ["s3:ListBucket"],
+             "Resource": [f"arn:aws:s3:::{BUCKET_NAME}"]},
             # harness 는 기본으로 관리형 메모리(memory/<harness>-…)를 만들고 대화 이력을 읽고 쓴다.
             {"Sid": "HarnessMemory", "Effect": "Allow", "Action": [
                 "bedrock-agentcore:ListEvents", "bedrock-agentcore:CreateEvent", "bedrock-agentcore:GetEvent",
@@ -326,21 +359,180 @@ def create_harness_role() -> str:
     return arn
 
 
+def harness_environment_variables() -> Dict[str, str]:
+    # AWS_REGION / AWS_DEFAULT_REGION 은 harness 예약 변수라 설정할 수 없다.
+    return {"S3_BUCKET": BUCKET_NAME}
+
+
+def doc_sharing_skill_uri() -> str:
+    return f"s3://{BUCKET_NAME}/{DOC_SHARING_SKILL_PREFIX}"
+
+
+def ensure_doc_sharing() -> str:
+    """doc-sharing skill 을 S3 에 올리고 config.json 을 채운다. 반환: s3 URI."""
+    logger.info("[1c+] doc-sharing skill → s3://%s/%s", BUCKET_NAME, DOC_SHARING_SKILL_PREFIX)
+    ensure_storage_bucket()
+    for prefix in ("artifacts/", "images/", "docs/"):
+        try:
+            s3.put_object(Bucket=BUCKET_NAME, Key=prefix, Body=b"")
+        except ClientError:
+            pass
+    skill_dir = ROOT / "skills" / "doc-sharing"
+    if not skill_dir.is_dir():
+        raise FileNotFoundError(f"missing skill dir: {skill_dir}")
+    cfg = {"s3_bucket": BUCKET_NAME, "region": region}
+    (skill_dir / "config.json").write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    for path in skill_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        key = DOC_SHARING_SKILL_PREFIX + str(path.relative_to(skill_dir)).replace("\\", "/")
+        extra = {"ContentType": "application/json"} if path.suffix == ".json" else (
+            {"ContentType": "text/markdown; charset=utf-8"} if path.suffix == ".md" else (
+                {"ContentType": "text/x-python"} if path.suffix == ".py" else {}))
+        if extra:
+            s3.upload_file(str(path), BUCKET_NAME, key, ExtraArgs=extra)
+        else:
+            s3.upload_file(str(path), BUCKET_NAME, key)
+    uri = doc_sharing_skill_uri()
+    save_config(doc_sharing_skill_uri=uri)
+    logger.info("✓ doc-sharing ready: %s", uri)
+    return uri
+
+
+def _wait_harness_ready(harness_id: str) -> Dict[str, Any]:
+    for _ in range(60):
+        cur = agentcore.get_harness(harnessId=harness_id)["harness"]
+        if cur["status"] == "READY":
+            return cur
+        if cur["status"].endswith("FAILED"):
+            raise RuntimeError(f"Harness {cur['status']}: {cur.get('failureReason', '')}")
+        time.sleep(5)
+    raise TimeoutError(f"Harness {harness_id} did not become READY")
+
+
+def _append_doc_sharing_prompt(system: Any) -> list:
+    text = ""
+    if isinstance(system, list):
+        for block in system:
+            if isinstance(block, dict) and block.get("text"):
+                text = str(block["text"]).rstrip()
+                break
+    elif isinstance(system, str):
+        text = system.rstrip()
+    if "doc-sharing" in text and "share_artifact.py" in text:
+        return [{"text": text}] if text else [{"text": DOC_SHARING_PROMPT.strip()}]
+    merged = f"{text}\n\n{DOC_SHARING_PROMPT}".strip() if text else DOC_SHARING_PROMPT.strip()
+    return [{"text": merged}]
+
+
+def _portal_harness_ids() -> List[str]:
+    """포털이 쓰거나 만든 harness ID 목록(태그 API 가 비는 경우가 있어 DB·config 기준)."""
+    ids: set[str] = set()
+    cfg = load_config()
+    if cfg.get("harness_id"):
+        ids.add(cfg["harness_id"])
+    if cfg.get("harness_arn") and "/harness/" in cfg["harness_arn"]:
+        ids.add(cfg["harness_arn"].rsplit("/", 1)[-1])
+    # DynamoDB 포털 agent 항목 (pk = ITEM#agent)
+    try:
+        ddb = session.resource("dynamodb").Table(DDB_TABLE)
+        from boto3.dynamodb.conditions import Key
+        start = None
+        while True:
+            kw = {"KeyConditionExpression": Key("pk").eq("ITEM#agent")}
+            if start:
+                kw["ExclusiveStartKey"] = start
+            resp = ddb.query(**kw)
+            for it in resp.get("Items", []):
+                data = it.get("data") or {}
+                if isinstance(data, str):
+                    try:
+                        data = json.loads(data)
+                    except ValueError:
+                        data = {}
+                if (data.get("agent_type") or "") != "harness":
+                    continue
+                arn = data.get("arn") or ""
+                if "/harness/" in arn:
+                    ids.add(arn.rsplit("/", 1)[-1])
+                ext = it.get("ext_id") or ""
+                if isinstance(ext, str) and ext.startswith("harness:"):
+                    ids.add(ext.split(":", 1)[1])
+            start = resp.get("LastEvaluatedKey")
+            if not start:
+                break
+    except Exception as e:  # noqa: BLE001
+        logger.warning("  portal harness scan skipped: %s", e)
+    # 이름 규칙: ai_portal + 포털에서 만든 hr_* 등
+    token = None
+    while True:
+        kw: Dict[str, Any] = {"maxResults": 50}
+        if token:
+            kw["nextToken"] = token
+        resp = agentcore.list_harnesses(**kw)
+        for h in resp.get("harnesses", []):
+            name = h.get("harnessName") or ""
+            if name == harness_api_name() or name.startswith("hr_"):
+                ids.add(h["harnessId"])
+        token = resp.get("nextToken")
+        if not token:
+            break
+    return sorted(ids)
+
+
+def refresh_portal_harness_sharing() -> None:
+    """포털 harness 들에 S3 env · doc-sharing skill · 공유 프롬프트를 반영한다."""
+    uri = doc_sharing_skill_uri()
+    env = harness_environment_variables()
+    updated = 0
+    for hid in _portal_harness_ids():
+        try:
+            cur = _wait_harness_ready(hid)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("  skip harness %s: %s", hid, e)
+            continue
+        skills = list(cur.get("skills") or [])
+        if not any((s.get("s3") or {}).get("uri", "").rstrip("/") == uri.rstrip("/") for s in skills):
+            skills.append({"s3": {"uri": uri if uri.endswith("/") else uri + "/"}})
+        prompt = _append_doc_sharing_prompt(cur.get("systemPrompt"))
+        logger.info("  Updating harness sharing: %s", hid)
+        agentcore.update_harness(
+            harnessId=hid,
+            environmentVariables=env,
+            skills=skills,
+            systemPrompt=prompt,
+        )
+        _wait_harness_ready(hid)
+        updated += 1
+    logger.info("✓ refreshed sharing on %d portal harness(es)", updated)
+
+
 def ensure_harness() -> Dict[str, str]:
     """MCP 테스트용 harness agent `ai_portal` 을 만든다(이미 있으면 재사용). 도구는 호출 때마다 지정한다."""
+    ensure_doc_sharing()
     logger.info("[1c] Harness agent '%s'", harness_api_name())
     api_name = harness_api_name()
     h = next((x for x in agentcore.list_harnesses().get("harnesses", []) if x.get("harnessName") == api_name), None)
     role = create_harness_role()      # 역할/정책은 harness 가 이미 있어도 항상 맞춘다(새 권한이 추가되면 기존 설치에도 반영되도록)
+    model_cfg = {"bedrockModelConfig": {
+        "modelId": HARNESS_MODEL_ID, "maxTokens": get_max_output_tokens(HARNESS_MODEL_ID)}}
+    system = _append_doc_sharing_prompt(HARNESS_SYSTEM_PROMPT)
+    skills = [{"s3": {"uri": doc_sharing_skill_uri()}}]
+    env = harness_environment_variables()
+    created = False
     if not h:
         for attempt in range(6):
             try:
                 h = agentcore.create_harness(
                     harnessName=api_name, executionRoleArn=role,
-                    model={"bedrockModelConfig": {"modelId": HARNESS_MODEL_ID, "maxTokens": 4096}},
-                    systemPrompt=[{"text": HARNESS_SYSTEM_PROMPT}],
-                    maxIterations=10, maxTokens=8192, timeoutSeconds=300,
+                    model=model_cfg,
+                    systemPrompt=system,
+                    skills=skills,
+                    environmentVariables=env,
+                    maxIterations=HARNESS_MAX_ITERATIONS, maxTokens=HARNESS_MAX_TOKENS,
+                    timeoutSeconds=HARNESS_TIMEOUT_SECONDS,
                     tags={"Project": project_name})["harness"]
+                created = True
                 break
             except ClientError as e:
                 if e.response["Error"]["Code"] in ("ValidationException",) and "assume" in str(e).lower() and attempt < 5:
@@ -348,15 +540,17 @@ def ensure_harness() -> Dict[str, str]:
                     continue
                 raise
         logger.info("Created harness: %s", h["harnessId"])
-    for _ in range(60):
-        cur = agentcore.get_harness(harnessId=h["harnessId"])["harness"]
-        if cur["status"] == "READY":
-            break
-        if cur["status"].endswith("FAILED"):
-            raise RuntimeError(f"Harness {cur['status']}: {cur.get('failureReason', '')}")
-        time.sleep(5)
-    else:
-        raise TimeoutError("Harness did not become READY")
+    cur = _wait_harness_ready(h["harnessId"])
+    if not created:
+        # 한도·공유 env/skill/프롬프트를 맞춘다.
+        logger.info("Updating harness defaults/sharing (%s)", cur["harnessId"])
+        agentcore.update_harness(
+            harnessId=cur["harnessId"], model=model_cfg,
+            systemPrompt=system, skills=skills, environmentVariables=env,
+            maxIterations=HARNESS_MAX_ITERATIONS, maxTokens=HARNESS_MAX_TOKENS,
+            timeoutSeconds=HARNESS_TIMEOUT_SECONDS)
+        cur = _wait_harness_ready(h["harnessId"])
+    refresh_portal_harness_sharing()
     info = {"harness_id": cur["harnessId"], "harness_arn": cur["arn"], "harness_name": api_name}
     save_config(**info)
     logger.info("✓ Harness READY: %s", cur["arn"])
@@ -1597,6 +1791,8 @@ def main() -> None:
     ap.add_argument("--logs-only", action="store_true", help="MCP 요청 로그 파이프라인(Firehose·Glue·Athena)을 만들고 interceptor 에 반영한 뒤 종료")
     ap.add_argument("--storage-only", action="store_true", help="Skill zip 용 S3 버킷만 만들고 종료")
     ap.add_argument("--harness-only", action="store_true", help="MCP 테스트용 harness agent 만 생성하고 종료")
+    ap.add_argument("--doc-sharing-only", action="store_true",
+                    help="doc-sharing skill 업로드 + portal harness 공유 설정만 갱신하고 종료")
     ap.add_argument("--gateway-only", action="store_true", help="AgentCore Gateway(+target, interceptor Lambda)만 생성하고 종료")
     ap.add_argument("--recreate-gateway", action="store_true",
                     help="gateway 의 인증 방식이 기대와 다르면 gateway·target 을 삭제하고 다시 만든다(ID·URL 이 바뀐다)")
@@ -1619,6 +1815,11 @@ def main() -> None:
     if args.logs_only:
         ensure_log_pipeline()
         ensure_gateways()          # interceptor Lambda 에 LOG_STREAM·권한을 반영한다
+        return
+    if args.doc_sharing_only:
+        create_harness_role()
+        ensure_doc_sharing()
+        refresh_portal_harness_sharing()
         return
     if args.harness_only:
         ensure_harness()

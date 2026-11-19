@@ -53,12 +53,20 @@ def test_bad_names_rejected(env, bad):
     assert post(client(), name=bad).status_code == 422 and not env
 
 
-def test_create_with_text_prompt_and_iam(env):
+def test_create_with_text_prompt_and_iam(env, monkeypatch):
+    monkeypatch.setattr(agent_create, "storage_bucket", lambda: "storage-for-ai-portal-test")
     r = post(client(), system_prompt="be nice")
     assert r.status_code == 200, r.text
     kw = env[0]
-    assert kw["harnessName"] == "my_agent" and kw["systemPrompt"] == [{"text": "be nice"}]
-    assert kw["model"] == {"bedrockModelConfig": {"modelId": "global.anthropic.m1", "maxTokens": 4096}} and "authorizerConfiguration" not in kw
+    assert kw["harnessName"] == "my_agent"
+    assert "be nice" in kw["systemPrompt"][0]["text"] and "doc-sharing" in kw["systemPrompt"][0]["text"]
+    assert kw["model"] == {"bedrockModelConfig": {"modelId": "global.anthropic.m1",
+                                                   "maxTokens": agent_create.get_max_output_tokens("global.anthropic.m1")}}
+    assert kw["maxIterations"] == agent_create.HARNESS_MAX_ITERATIONS
+    assert kw["maxTokens"] == agent_create.HARNESS_MAX_TOKENS
+    assert kw["environmentVariables"]["S3_BUCKET"] == "storage-for-ai-portal-test"
+    assert any((s.get("s3") or {}).get("uri", "").endswith("skills/doc-sharing/") for s in kw["skills"])
+    assert "authorizerConfiguration" not in kw
     it = db.list_items("agent")[0]
     assert it["ext_id"].startswith("harness:h-") and it["data"]["agent_type"] == "harness"
 
@@ -69,13 +77,16 @@ def test_unusable_model_and_duplicate(env):
     assert post(client()).status_code == 200 and post(client()).status_code == 409
 
 
-def test_mcp_and_skill_selected(env):
+def test_mcp_and_skill_selected(env, monkeypatch):
+    monkeypatch.setattr(agent_create, "storage_bucket", lambda: "storage-for-ai-portal-test")
     mid = db.insert_item("mcp", "srv", "", "a@x.com", {"endpoint": "https://e.example/mcp"})
     _grant(mid)
     sid = db.insert_item("skill", "sk", "", "a@x.com", {"source_type": "s3", "s3_uri": "s3://b/p"})
     assert post(client(), mcp_ids=[mid], skill_ids=[sid]).status_code == 200
     kw = env[0]
-    assert kw["tools"][0]["type"] == "remote_mcp" and kw["skills"] == [{"s3": {"uri": "s3://b/p/"}}]
+    assert kw["tools"][0]["type"] == "remote_mcp"
+    assert {"s3": {"uri": "s3://b/p/"}} in kw["skills"]
+    assert any((s.get("s3") or {}).get("uri", "").endswith("skills/doc-sharing/") for s in kw["skills"])
 
 
 def test_mcp_without_usage_approval_is_refused(env):
@@ -111,9 +122,11 @@ def test_jwt_auth_requires_cognito(env, monkeypatch):
 
 
 def test_registry_prompt_used(env, monkeypatch):
+    monkeypatch.setattr(agent_create, "storage_bucket", lambda: "storage-for-ai-portal-test")
     pid = db.insert_item("prompt", "pp", "", "a@x.com", {"prompt_id": "P1"})
     monkeypatch.setattr(catalog, "harness_system_prompt", lambda u, i: [{"text": "from registry"}])
-    assert post(client(), prompt_id=pid).status_code == 200 and env[0]["systemPrompt"] == [{"text": "from registry"}]
+    assert post(client(), prompt_id=pid).status_code == 200
+    assert "from registry" in env[0]["systemPrompt"][0]["text"] and "doc-sharing" in env[0]["systemPrompt"][0]["text"]
 
 
 def test_delete_removes_harness_only_for_creator_or_admin(env, monkeypatch):

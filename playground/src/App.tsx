@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as api from "./api";
 import type { AgentMeta, Message, StreamEvent, Task, ToolEvent, User } from "./api";
 import { AlertDialog } from "./AlertDialog";
@@ -100,10 +100,13 @@ export default function App() {
   const [paused, setPaused] = useState<Record<string, boolean>>({});
   const queuedRef = useRef(queued);                 // 비동기 콜백이 최신 대기열을 읽도록 ref 로도 든다
   const pendingSteer = useRef<{ taskId: string; text: string } | null>(null);
-  const sending = useRef(false);                    // 응답 중 여부(상태는 한 박자 늦어 연속 입력이 새는 것을 막는다)
+  const busyTasks = useRef(new Set<string>());      // 백그라운드 포함, 응답 중인 task
+  const aborts = useRef(new Map<string, AbortController>());
+  const streamByTask = useRef<Record<string, ToolEvent[]>>({});
+  const pendingUserByTask = useRef<Record<string, string>>({});
+  const errByTask = useRef<Record<string, string>>({});
   const messagesRef = useRef<Message[]>([]);        // 최신 화면의 메시지(비동기 콜백에서 읽는다)
   const viewTask = useRef<string | null>(null);     // 지금 화면에 열려 있는 task(응답이 끝났을 때 아직 그 task 를 보고 있는지 확인)
-  const abort = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const agentPickerRef = useRef<HTMLDivElement>(null);
@@ -114,6 +117,28 @@ export default function App() {
   const agentCreating = agent?.status === "CREATING";
   viewTask.current = taskId;
   messagesRef.current = messages;
+
+  function abortTask(tid: string) {
+    const ctl = aborts.current.get(tid);
+    if (ctl) ctl.abort();
+  }
+  function abortAllTasks() {
+    for (const ctl of aborts.current.values()) ctl.abort();
+    aborts.current.clear();
+    busyTasks.current.clear();
+    streamByTask.current = {};
+    pendingUserByTask.current = {};
+    errByTask.current = {};
+  }
+  function syncViewStream(tid: string | null) {
+    if (!tid || !busyTasks.current.has(tid)) {
+      setStreaming(false); setStreamEvents([]); setChatErr(tid ? (errByTask.current[tid] ?? "") : "");
+      return;
+    }
+    setStreaming(true);
+    setStreamEvents(streamByTask.current[tid] ?? []);
+    setChatErr(errByTask.current[tid] ?? "");
+  }
 
   useEffect(() => {
     (async () => {
@@ -172,7 +197,7 @@ export default function App() {
   // agent 를 고르면 그 agent 의 task 목록을 읽고, 가장 최근 task 를 연다(없으면 빈 화면에서 시작).
   // CREATING 중에는 채팅 진입을 하지 않는다.
   useEffect(() => {
-    abort.current?.abort(); pendingSteer.current = null; sending.current = false; setStreaming(false); setStreamEvents([]); setChatErr("");
+    abortAllTasks(); pendingSteer.current = null; setStreaming(false); setStreamEvents([]); setChatErr("");
     queuedRef.current = {}; setQueued({}); setPaused({});
     setTasks([]); setTaskId(null); setMessages([]);
     if (agentId === null || !user || agentCreating) return;
@@ -187,20 +212,31 @@ export default function App() {
   }, [agentId, user, agentCreating]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function leaveTask() {
-    // 보던 task 를 떠난다: 진행 중인 응답은 중단하되, 그 task 의 대기열은 일시정지로 둔다(돌아와서 Resume 으로 이어 보낼 수 있다).
+    // task 전환 시 진행 중 응답은 끊지 않는다(백그라운드에서 끝까지 받아 저장). 화면 스트림 표시만 떼어 낸다.
+    // 해당 task 대기열은 일시정지로 두어, 돌아와 Resume 으로 이어 보낼 수 있다.
     const cur = viewTask.current;
-    if (sending.current && cur && (queuedRef.current[cur] ?? []).length > 0) setPaused((p) => ({ ...p, [cur]: true }));
+    if (cur && busyTasks.current.has(cur) && (queuedRef.current[cur] ?? []).length > 0) {
+      setPaused((p) => ({ ...p, [cur]: true }));
+    }
     pendingSteer.current = null;
-    const ctl = abort.current;
-    abort.current = null; ctl?.abort();
-    sending.current = false; setStreaming(false); setStreamEvents([]); setChatErr("");
+    setStreaming(false); setStreamEvents([]); setChatErr("");
   }
   async function openTask(aid: number, id: string, alive = true) {
     leaveTask();
     try {
       const t = await api.getTask(aid, id);
       if (!alive) return;
-      setTaskId(id); setMessages(t.messages); stick.current = true; setSidebarOpen(false);
+      setTaskId(id); stick.current = true; setSidebarOpen(false);
+      if (busyTasks.current.has(id)) {
+        const pending = pendingUserByTask.current[id];
+        setMessages(pending
+          ? [...t.messages, { role: "user", content: pending, tool_events: [] }]
+          : t.messages);
+        syncViewStream(id);
+      } else {
+        setMessages(t.messages);
+        syncViewStream(id);
+      }
     } catch (e: any) { setChatErr(e.message); }
   }
 
@@ -251,14 +287,20 @@ export default function App() {
   }
   async function removeTask(t: Task) {
     try {
+      abortTask(t.id);
       await api.deleteTask(t.agent_id, t.id);
       if (t.id in queuedRef.current) { const n = { ...queuedRef.current }; delete n[t.id]; queuedRef.current = n; setQueued(n); }
       clearPaused(t.id);
+      delete streamByTask.current[t.id];
+      delete pendingUserByTask.current[t.id];
+      delete errByTask.current[t.id];
+      busyTasks.current.delete(t.id);
+      aborts.current.delete(t.id);
       const rest = tasks.filter((x) => x.id !== t.id);
       setTasks(rest);
       if (t.id === taskId) {
         const next = [...rest].sort((a, b) => b.updated_at - a.updated_at)[0];
-        if (next) await openTask(t.agent_id, next.id); else { setTaskId(null); setMessages([]); }
+        if (next) await openTask(t.agent_id, next.id); else { setTaskId(null); setMessages([]); setStreaming(false); setStreamEvents([]); }
       }
     } catch (e: any) { setChatErr(e.message); }
   }
@@ -271,23 +313,43 @@ export default function App() {
     setPaused((p) => { if (!p[taskId]) return p; const n = { ...p }; delete n[taskId]; return n; });
   }
 
-  /** 질문 하나를 보내고 스트림을 받는다. 끝나면 서버가 저장한 대화로 화면을 맞추고, 중지가 아니면 대기열의 다음 메시지를 이어서 보낸다. */
+  /** 질문 하나를 보내고 스트림을 받는다. 끝나면 서버가 저장한 대화로 화면을 맞추고, 중지가 아니면 대기열의 다음 메시지를 이어서 보낸다.
+   *  task 를 바꿔도 스트림은 계속되며, 보고 있는 task 일 때만 화면을 갱신한다. */
   async function dispatch(tid: string, text: string) {
     if (agentId === null) return;
-    sending.current = true; setChatErr("");
-    stick.current = true;
-    const baseline = messagesRef.current.filter((m) => m.seq !== undefined).length;      // 서버에 저장돼 있는 메시지 수(낙관적 항목 제외)
-    setMessages((cur) => [...cur, { role: "user", content: text, tool_events: [] }]);
-    setStreaming(true); setStreamEvents([]);
-    const ctl = new AbortController(); abort.current = ctl;
+    busyTasks.current.add(tid);
+    pendingUserByTask.current[tid] = text;
+    errByTask.current[tid] = "";
+    streamByTask.current[tid] = [];
+    const onView = () => viewTask.current === tid;
+    if (onView()) {
+      setChatErr("");
+      stick.current = true;
+      setMessages((cur) => [...cur, { role: "user", content: text, tool_events: [] }]);
+      setStreaming(true); setStreamEvents([]);
+    }
+    const baseline = onView()
+      ? messagesRef.current.filter((m) => m.seq !== undefined).length
+      : (await api.getTask(agentId, tid).catch(() => ({ messages: [] as Message[] }))).messages.length;
+    const ctl = new AbortController();
+    aborts.current.set(tid, ctl);
     let acc: ToolEvent[] = [], stopped = false;
     try {
       await api.streamChat(agentId, tid, text, (e) => {
-        if (e.error) setChatErr(e.error);
-        acc = applyEvent(acc, e); setStreamEvents(acc);
+        if (e.error) {
+          errByTask.current[tid] = e.error;
+          if (onView()) setChatErr(e.error);
+        }
+        acc = applyEvent(acc, e);
+        streamByTask.current[tid] = acc;
+        if (onView()) setStreamEvents(acc);
       }, ctl.signal);
     } catch (x: any) {
-      if (x.name === "AbortError") stopped = true; else setChatErr(x.message);
+      if (x.name === "AbortError") stopped = true;
+      else {
+        errByTask.current[tid] = x.message;
+        if (onView()) setChatErr(x.message);
+      }
     }
     if (ctl.signal.aborted) stopped = true;
     // 서버가 저장한 대화를 다시 읽어 화면과 맞춘다. 중지는 연결을 끊는 것이라 서버가 받은 만큼 저장하는 시점이 이 읽기보다 늦을 수 있다
@@ -300,11 +362,15 @@ export default function App() {
         t = await api.getTask(agentId, tid);
       }
       if (!stopped || t.messages.length > before) {
-        if (viewTask.current === tid) setMessages(t.messages);          // 다른 task 로 옮겨 갔다면 그 화면은 건드리지 않는다
+        if (onView()) setMessages(t.messages);
         setTasks(await api.listTasks(agentId));
       }
     } catch { /* 목록 갱신 실패는 화면에 이미 있는 내용으로 둔다 */ }
-    if (abort.current === ctl) { setStreamEvents([]); setStreaming(false); abort.current = null; sending.current = false; }
+    if (aborts.current.get(tid) === ctl) aborts.current.delete(tid);
+    busyTasks.current.delete(tid);
+    delete streamByTask.current[tid];
+    delete pendingUserByTask.current[tid];
+    if (onView()) { setStreamEvents([]); setStreaming(false); }
 
     if (stopped) {
       const steer = pendingSteer.current;
@@ -329,17 +395,20 @@ export default function App() {
 
   const send = async (text: string) => {
     if (agentId === null) return;
-    // 응답 중이면 대기열에 쌓는다(진행 중인 응답은 멈추지 않는다).
-    if (sending.current && taskId) {
+    // 이 task 가 응답 중이면 대기열에 쌓는다(진행 중인 응답은 멈추지 않는다). 다른 task 응답과는 무관하다.
+    if (taskId && busyTasks.current.has(taskId)) {
       setQueue(taskId, [...(queuedRef.current[taskId] ?? []), { id: crypto.randomUUID?.() ?? String(Date.now() + Math.random()), text }]);
       return;
     }
     setChatErr("");
     let tid = taskId;
-    sending.current = true;                                // task 를 만드는 동안 들어온 입력도 대기열로 가도록 먼저 표시
     try {
       if (!tid) { const created = await api.createTask(agentId); tid = created.id; setTasks((cur) => [created, ...cur]); setTaskId(tid); }
-    } catch (e: any) { sending.current = false; setChatErr(e.message); return; }
+    } catch (e: any) { setChatErr(e.message); return; }
+    if (busyTasks.current.has(tid)) {
+      setQueue(tid, [...(queuedRef.current[tid] ?? []), { id: crypto.randomUUID?.() ?? String(Date.now() + Math.random()), text }]);
+      return;
+    }
     await dispatch(tid, text);
   };
   const removeQueued = (id: string) => {
@@ -349,7 +418,7 @@ export default function App() {
     if (rest.length === 0) clearPaused(taskId);
   };
   const resumeQueue = async () => {
-    if (!taskId || sending.current) return;
+    if (!taskId || busyTasks.current.has(taskId)) return;
     clearPaused(taskId); await drain(taskId);
   };
   /** 진행 중인 응답을 멈추고 이 대기 메시지를 바로 보낸다. 응답 중이 아니면 그냥 보낸다. */
@@ -359,7 +428,7 @@ export default function App() {
     const item = q.find((m) => m.id === id);
     if (!item) return;
     setQueue(taskId, q.filter((m) => m.id !== id)); clearPaused(taskId);
-    if (sending.current) { pendingSteer.current = { taskId, text: item.text }; abort.current?.abort(); return; }
+    if (busyTasks.current.has(taskId)) { pendingSteer.current = { taskId, text: item.text }; abortTask(taskId); return; }
     await dispatch(taskId, item.text);
   };
 
@@ -368,7 +437,7 @@ export default function App() {
     try { setUser(await api.loginWithGoogle(credential)); } catch { setError("로그인에 실패했습니다. 다시 시도하세요."); }
   }
   async function onLogout() {
-    abort.current?.abort(); pendingSteer.current = null; sending.current = false;
+    abortAllTasks(); pendingSteer.current = null;
     queuedRef.current = {}; setQueued({}); setPaused({});
     try { await api.logout(); } catch { /* 무시 */ }
     disableAutoSelect(); setUser(null); setAgents(null); setTasks([]); setMessages([]); setTaskId(null);
@@ -465,7 +534,7 @@ export default function App() {
               </div>
             </div>
             <ChatInput disabled={agentId === null} waiting={streaming} onSend={send}
-              onStop={() => abort.current?.abort()} focusKey={`${agentId}:${taskId}`}
+              onStop={() => { if (taskId) abortTask(taskId); }} focusKey={`${agentId}:${taskId}`}
               queuedMessages={taskId ? queued[taskId] ?? [] : []} queuePaused={Boolean(taskId && paused[taskId])}
               onRemoveQueued={removeQueued} onSteerQueued={steerQueued} onResumeQueue={resumeQueue} />
           </>

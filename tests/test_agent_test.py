@@ -184,11 +184,16 @@ def test_jwt_harness_is_called_with_users_bearer_token(env, monkeypatch):
     monkeypatch.setattr(mcp_token, "issue", lambda email: {"access_token": "TOK-" + email})
     monkeypatch.setattr(aws, "get_harness", lambda hid: {"status": "READY"})
     monkeypatch.setattr(agent_test, "_harness_events",
-                        lambda arn, history, user, session, system=None, bearer=None, tools=None:
-                        (seen.update(b=bearer, tools=tools), iter([{"t": "ok"}]))[1])
+                        lambda arn, history, user, session, system=None, bearer=None, tools=None, skills=None:
+                        (seen.update(b=bearer, tools=tools, skills=skills, system=system), iter([{"t": "ok"}]))[1])
     iid = agent({"arn": HN, "agent_type": "harness", "auth": "JWT"})
     r = client().post(f"/api/agents/{iid}/chat", json=BODY)
     assert r.status_code == 200 and seen["b"] == "TOK-a@x.com" and "TOK-" not in r.text
+    assert any((s.get("s3") or {}).get("uri", "").endswith("skills/doc-sharing/") for s in (seen.get("skills") or []))
+    from application import mcp_test
+    aid = mcp_test.actor_id("a@x.com")
+    assert seen["system"] and f"actor_id: {aid}" in seen["system"][0]["text"]
+    assert f"/mnt/workspace/{aid}/artifacts" in seen["system"][0]["text"]
 
 
 def test_jwt_gateway_mcp_injected_as_remote_mcp_on_invoke(env, monkeypatch):
@@ -204,8 +209,8 @@ def test_jwt_gateway_mcp_injected_as_remote_mcp_on_invoke(env, monkeypatch):
     monkeypatch.setattr(mcp_token, "issue", lambda email: {"access_token": "TOK-" + email})
     monkeypatch.setattr(aws, "get_harness", lambda hid: {"status": "READY"})
     monkeypatch.setattr(agent_test, "_harness_events",
-                        lambda arn, history, user, session, system=None, bearer=None, tools=None:
-                        (seen.update(b=bearer, tools=tools), iter([{"t": "ok"}]))[1])
+                        lambda arn, history, user, session, system=None, bearer=None, tools=None, skills=None:
+                        (seen.update(b=bearer, tools=tools, skills=skills), iter([{"t": "ok"}]))[1])
     iid = agent({"arn": HN, "agent_type": "harness", "auth": "JWT", "mcp_ids": [mid], "jwt_mcp": True})
     r = client().post(f"/api/agents/{iid}/chat", json=BODY)
     assert r.status_code == 200, r.text
@@ -237,7 +242,7 @@ def test_jwt_harness_unsigned_request_carries_authorization_header(env, monkeypa
 def test_empty_assistant_turns_are_dropped_and_empty_user_turns_refused(env, monkeypatch):
     seen = []
     monkeypatch.setattr(agent_test, "_harness_events",
-                        lambda arn, history, user, session, system=None, bearer=None, tools=None:
+                        lambda arn, history, user, session, system=None, bearer=None, tools=None, skills=None:
                         (seen.append(history), iter([{"t": "ok"}]))[1])
     monkeypatch.setattr(aws, "get_harness", lambda hid: {"status": "READY"})
     iid = agent({"arn": HN, "agent_type": "harness"})

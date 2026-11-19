@@ -411,7 +411,7 @@ UI 마법사 단계는 [기능](#기능)의 «에이전트 생성 탭»을 참�
 4. **MCP·Skill·인증** — `bake_tools(mcp_ids)`(IAM Gateway·직접 MCP 만 create 에 bake; JWT Gateway 는 제외)·`_skills(skill_ids)`·JWT Gateway 가 있으면 인증을 JWT 로 강제하고 Cognito 기반 `_authorizer()`(`customJWTAuthorizer`).
 5. **이름 중복** — 포털 DB에 같은 이름 agent 가 있으면 409.
 6. **`create_harness`** — `bedrock-agentcore-control` 에 다음을 보냅니다.
-   - 필수: `harnessName`, `executionRoleArn`(`role_arn()` — installer 의 `role-harness-for-ai-portal-<region>` 또는 `HARNESS_ROLE_ARN`), `clientToken`(UUID), `model.bedrockModelConfig`(선택한 모델, `maxTokens` 4096), `maxIterations` 10 · `maxTokens` 8192 · `timeoutSeconds` 300, tags `Project=ai-portal` / `Owner=portal`
+   - 필수: `harnessName`, `executionRoleArn`(`role_arn()` — installer 의 `role-harness-for-ai-portal-<region>` 또는 `HARNESS_ROLE_ARN`), `clientToken`(UUID), `model.bedrockModelConfig`(선택한 모델, `maxTokens`=모델별 상한·`get_max_output_tokens`), `maxIterations` 20 · `maxTokens` 50000 · `timeoutSeconds` 300(agentcore-harness 와 동일), tags `Project=ai-portal` / `Owner=portal`
    - 선택: `systemPrompt`, `tools`(bake 된 IAM/직접 MCP), `skills`, `authorizerConfiguration`
 7. **포털 DB 저장** — `agent_type=harness`, ARN·상태·모델·auth·mcp/skill id·`jwt_mcp` 를 `data` 에 넣고 `ext_id=harness:<harnessId>` 로 항목을 만듭니다. description 을 넣었으면 `desc_edited=1` 로 표시해 이후 동기화가 설명을 덮지 않게 합니다.
 
@@ -470,6 +470,7 @@ AgentCore harness 는 도구를 부를 때 **호출자 JWT 를 Gateway 로 passt
 python installer.py --registry-only        # Registry `ai-portal` 만
 python installer.py --notifications-only   # 승인 요청 메일 알림만
 python installer.py --harness-only         # MCP 테스트용 harness agent `ai_portal` 만
+python installer.py --doc-sharing-only     # doc-sharing skill 업로드 + 포털 harness 산출물 공유(env/skill/프롬프트) 갱신
 python installer.py --gateway-only         # AgentCore Gateway `gw-ai-portal`·`gw-websearch`(+ target, interceptor Lambda) 만
 python installer.py --table-only           # DynamoDB 저장소 테이블만
 python installer.py --storage-only         # Skill zip·로그용 S3 버킷만

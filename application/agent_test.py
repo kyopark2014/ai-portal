@@ -139,9 +139,9 @@ def _runtime_events(arn: str, payload: bytes, session: str, user: auth.User) -> 
 
 def _harness_events(arn: str, history: list[dict], user: auth.User, session: str,
                     system: list[dict] | None = None, bearer: str | None = None,
-                    tools: list[dict] | None = None) -> Iterator[dict]:
+                    tools: list[dict] | None = None, skills: list[dict] | None = None) -> Iterator[dict]:
     """bearer 가 있으면 JWT 인증 harness: SigV4 서명을 끄고 Authorization: Bearer 헤더로 호출한다.
-    tools 가 있으면 이 호출에만 도구 목록을 덮어쓴다(JWT Gateway remote_mcp 주입)."""
+    tools/skills 가 있으면 이 호출에만 목록을 덮어쓴다(JWT Gateway remote_mcp · doc-sharing 주입)."""
     region = _region_of(arn)
     if bearer:
         rt = aws.boto3.client("bedrock-agentcore", region_name=region, config=Config(
@@ -154,6 +154,8 @@ def _harness_events(arn: str, history: list[dict], user: auth.User, session: str
     extra: dict[str, Any] = {"systemPrompt": system} if system else {}
     if tools is not None:
         extra["tools"] = tools
+    if skills is not None:
+        extra["skills"] = skills
     if not bearer:                                  # JWT 호출의 사용자는 토큰이 정한다 (IAM 호출에서만 runtimeUserId 를 지정)
         extra["runtimeUserId"] = mcp_test.actor_id(user.email)
     r = rt.invoke_harness(harnessArn=arn, runtimeSessionId=session, actorId=mcp_test.actor_id(user.email),
@@ -184,15 +186,18 @@ def agent_events(it: dict, history: list[dict], session_id: str, user: auth.User
     """agent(harness/runtime)를 호출해 정규화된 이벤트(t / tool_call / tool_result / error …)를 낸다.
 
     호출 권한 검사는 호출한 쪽에서 끝낸 뒤 부른다. 준비 상태 검사처럼 시작 전에 알 수 있는 오류는 HTTPException 으로 **바로** 던진다
-    (스트림이 시작되기 전이라 HTTP 상태로 알려진다). with_system=False 면 harness 에 systemPrompt 를 넘기지 않아 agent 자체의 prompt 를 쓴다(Playground)."""
+    (스트림이 시작되기 전이라 HTTP 상태로 알려진다). with_system=False(Playground) 여도 harness bake prompt 에
+    actor_id·ARTIFACTS_DIR 을 붙여 systemPrompt 로 넘긴다(harness-work 와 동일)."""
     kind, arn = target_of(it)
     data = it["data"] or {}
     mcp_ids = list(data.get("mcp_ids") or [])
+    skill_ids = list(data.get("skill_ids") or [])
     # JWT harness 입구 또는 JWT Gateway 도구 → 실행자 Cognito 토큰이 필요하다
     jwt_tools = bool(mcp_ids) and agent_create.mcp_needs_caller_jwt(mcp_ids, user)
     need_jwt = kind == "harness" and (data.get("auth") == "JWT" or jwt_tools)
     bearer = None
     tools = None
+    skills = None
     if kind == "harness" and mcp_ids:
         for gid in agent_create.jwt_gateway_ids_for(mcp_ids, user):
             mcp_token.grant(user.email, gid)                     # 사용 승인된 사람만 여기까지 온다 → Cognito 그룹 맞춤
@@ -201,9 +206,18 @@ def agent_events(it: dict, history: list[dict], session_id: str, user: auth.User
         tools = agent_create.invoke_tools(mcp_ids, user, bearer)
     elif need_jwt:
         bearer = mcp_token.issue(user.email)["access_token"]
+    baked_system = None
     if kind == "harness":
+        # 호출마다 사용자 skill + doc-sharing 을 붙여, 예전에 만든 harness 에도 산출물 공유가 되게 한다.
         try:
-            st = aws.get_harness(arn.split("/")[-1])["status"]
+            skills = agent_create.merge_skills(
+                agent_create._skills(skill_ids, user) if skill_ids else [])
+        except HTTPException:
+            skills = agent_create.merge_skills([])
+        try:
+            hinfo = aws.get_harness(arn.split("/")[-1])
+            st = hinfo.get("status") or "READY"
+            baked_system = hinfo.get("systemPrompt")
         except Exception:  # noqa: BLE001 — 상태를 못 읽으면 호출을 시도해 본다
             st = "READY"
         if st != data.get("status"):                # 방금 읽은 상태를 화면에도 반영한다(CREATING 으로 남지 않게)
@@ -211,11 +225,20 @@ def agent_events(it: dict, history: list[dict], session_id: str, user: auth.User
         if st != "READY":
             raise HTTPException(409, f"harness 가 아직 준비되지 않았습니다 (상태: {st}). 잠시 뒤 다시 시도하세요" if st in ("CREATING", "UPDATING")
                                 else f"harness 를 호출할 수 없는 상태입니다 ({st})")
-    system = catalog.harness_system_prompt(user, prompt_id) if kind == "harness" and with_system else None   # runtime 에는 해당 없음
+    # harness-work 와 같이 Invoke 때마다 systemPrompt 에 actor_id · ARTIFACTS_DIR 을 넣는다.
+    # Playground(with_system=False)도 bake 된 harness prompt 를 읽어 같은 방식으로 붙인다.
+    if kind == "harness":
+        if with_system:
+            system = catalog.harness_system_prompt(user, prompt_id)
+        else:
+            system = baked_system if isinstance(baked_system, list) else None
+        system = agent_create.with_actor_context(system, mcp_test.actor_id(user.email))
+    else:
+        system = None
     # 사용자별로 세션을 분리해 다른 사용자의 agent 세션/메모리를 재사용하지 못하게 한다
     session = f"{uuid.uuid5(uuid.NAMESPACE_URL, user.email)}-{session_id}"[:100]
     if kind == "harness":
-        return _harness_events(arn, history, user, session, system, bearer, tools)
+        return _harness_events(arn, history, user, session, system, bearer, tools, skills)
     return _runtime_events(arn, _runtime_payload(history[-1]["content"], history, user, session), session, user)
 
 

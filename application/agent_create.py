@@ -32,6 +32,37 @@ NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,39}$")      # CreateHarness harne
 MAX_TOOLS, MAX_SKILLS = 10, 10
 _TOOLNAME = re.compile(r"[^A-Za-z0-9_-]+")
 
+# agentcore-harness CreateHarness 한도와 동일
+HARNESS_MAX_ITERATIONS = 20
+HARNESS_MAX_TOKENS = 50000
+HARNESS_TIMEOUT_SECONDS = 300
+
+# CreateHarness 에 bake 하는 고정 안내(호출마다 actor_id 는 with_actor_context 로 붙인다)
+DOC_SHARING_PROMPT = (
+    "## Artifact sharing (REQUIRED) — doc-sharing skill\n"
+    "- 결과 파일(PPT/PDF/DOCX/XLSX/PNG/CSV/HTML/MD 등)을 만들었다면, 최종 답변 전에 반드시 "
+    "**doc-sharing** skill의 share_artifact.py를 실행하세요.\n"
+    "- 로컬 경로(`/tmp/...`, `/mnt/workspace/...`)만 안내하는 것은 금지입니다. "
+    "사용자는 그 경로에 접근할 수 없습니다.\n"
+    "- 스크립트가 반환한 `url`(presigned 다운로드 링크)을 최종 답변에 반드시 포함하세요.\n"
+    "- InvokeHarness 호출마다 systemPrompt 에 `actor_id` 와 `ARTIFACTS_DIR` 이 명시됩니다. "
+    "그 값을 그대로 쓰세요(닉네임·추측·빈 값 금지).\n"
+)
+
+
+def get_max_output_tokens(model_id: str = "") -> int:
+    """Bedrock Anthropic Claude 모델별 출력 토큰 상한(agentcore-harness 와 동일)."""
+    mid = model_id.lower()
+    if "claude-opus-4-7" in mid or "claude-opus-4-6" in mid:
+        return 128000
+    if "claude-opus-4-5" in mid:
+        return 64000
+    if "claude-opus-4" in mid or "claude-4-opus" in mid:
+        return 128000
+    if "claude-sonnet-4" in mid or "claude-4-sonnet" in mid or "claude-haiku-4" in mid:
+        return 64000
+    return 8192
+
 
 class AgentCreateIn(BaseModel):
     name: str = Field(min_length=1, max_length=40)
@@ -55,6 +86,84 @@ def role_arn() -> str:
     import os
     return (os.environ.get("HARNESS_ROLE_ARN") or catalog.config_value("harness_role_arn")
             or f"arn:aws:iam::{aws.account_id()}:role/role-harness-for-ai-portal-{aws.region()}")
+
+
+def storage_bucket() -> str:
+    """산출물·skill 이 올라가는 포털 S3 버킷."""
+    import os
+    return (os.environ.get("STORAGE_BUCKET") or catalog.config_value("storage_bucket")
+            or f"storage-for-ai-portal-{aws.account_id()}-{aws.region()}")
+
+
+def doc_sharing_skill() -> dict:
+    """InvokeHarness / CreateHarness 에 넣을 doc-sharing skill (S3)."""
+    return {"s3": {"uri": f"s3://{storage_bucket()}/skills/doc-sharing/"}}
+
+
+def harness_environment() -> dict[str, str]:
+    """doc-sharing 이 쓰는 harness 환경 변수. (AWS_REGION 은 harness 예약 변수라 넣지 않는다.)"""
+    return {"S3_BUCKET": storage_bucket()}
+
+
+def _prompt_text(system: list[dict] | None) -> str:
+    if not system:
+        return ""
+    for block in system:
+        if isinstance(block, dict) and block.get("text"):
+            return str(block["text"]).rstrip()
+    return ""
+
+
+def with_doc_sharing_prompt(system: list[dict] | None) -> list[dict]:
+    """시스템 프롬프트에 산출물 공유 안내를 붙인다(CreateHarness bake 용)."""
+    base = _prompt_text(system)
+    if "doc-sharing" in base and "share_artifact.py" in base:
+        return [{"text": base}] if base else [{"text": DOC_SHARING_PROMPT.strip()}]
+    text = f"{base}\n\n{DOC_SHARING_PROMPT}".strip() if base else DOC_SHARING_PROMPT.strip()
+    return [{"text": text}]
+
+
+def with_actor_context(system: list[dict] | None, actor: str) -> list[dict]:
+    """harness-work 와 같이 InvokeHarness 때마다 actor_id · ARTIFACTS_DIR 을 systemPrompt 에 붙인다."""
+    aid = (actor or "").strip()
+    base = with_doc_sharing_prompt(system)[0]["text"]
+    if not aid:
+        return [{"text": base}]
+    # 이전 호출에 붙었던 actor 블록을 제거하고 이번 값으로 다시 쓴다
+    marker = "\nactor_id: "
+    if marker in base:
+        base = base.split(marker, 1)[0].rstrip()
+    artifacts_dir = f"/mnt/workspace/{aid}/artifacts"
+    base = (
+        f"{base}\n\n"
+        f"actor_id: {aid}\n"
+        "\n"
+        "## Paths (use absolute paths when writing files)\n"
+        f"- SESSION_STORAGE_DIR: /mnt/workspace\n"
+        f"- ARTIFACTS_DIR: {artifacts_dir}\n"
+        f"모든 산출물은 반드시 ARTIFACTS_DIR ({artifacts_dir}) 아래에 생성하세요. "
+        f"다른 actor 폴더나 /tmp 에만 두고 공유하지 마세요.\n"
+        f"Example: write/save to '{artifacts_dir}/report.md'\n"
+        "\n"
+        "산출물 생성 후 반드시 **doc-sharing** skill로 공유하세요:\n"
+        "  aws s3 sync s3://$S3_BUCKET/skills/doc-sharing/ /tmp/doc-sharing/\n"
+        f"  python3 /tmp/doc-sharing/scripts/share_artifact.py "
+        f"--filepath '{artifacts_dir}/파일명' --actor-id \"{aid}\"\n"
+        "반환된 url(presigned)을 사용자에게 전달하세요. 로컬 경로만 알려주지 마세요.\n"
+        f"actor_id 인자에는 반드시 \"{aid}\" 를 그대로 사용하세요. "
+        "닉네임·표시 이름·추측·빈 값으로 바꾸지 마세요.\n"
+    )
+    return [{"text": base}]
+
+
+def merge_skills(skills: list[dict] | None) -> list[dict]:
+    """사용자 선택 skill 뒤에 doc-sharing 을 항상 붙인다(중복 S3 URI 제거)."""
+    out = list(skills or [])
+    doc = doc_sharing_skill()
+    uri = doc["s3"]["uri"]
+    if not any((s.get("s3") or {}).get("uri", "").rstrip("/") == uri.rstrip("/") for s in out):
+        out.append(doc)
+    return out
 
 
 def _authorizer() -> dict:
@@ -221,13 +330,14 @@ def create(body: AgentCreateIn, user: auth.User = Depends(auth.current_user)):
         system = catalog.harness_system_prompt(user, body.prompt_id)
     else:
         system = [{"text": body.system_prompt.strip()}] if body.system_prompt.strip() else None
+    system = with_doc_sharing_prompt(system)
 
     need_jwt = mcp_needs_caller_jwt(body.mcp_ids, user)
     auth_kind = "JWT" if need_jwt else body.auth
     if need_jwt and body.auth != "JWT":
         log.info("forcing JWT auth for agent %s (JWT Gateway MCP selected)", body.name)
 
-    tools, skills = bake_tools(body.mcp_ids, user), _skills(body.skill_ids, user)
+    tools, skills = bake_tools(body.mcp_ids, user), merge_skills(_skills(body.skill_ids, user))
     authorizer = _authorizer() if auth_kind == "JWT" else None
 
     if any(i["name"] == body.name for i in db.list_items("agent")):
@@ -235,10 +345,12 @@ def create(body: AgentCreateIn, user: auth.User = Depends(auth.current_user)):
     try:
         params: dict = dict(
             harnessName=body.name, executionRoleArn=role_arn(), clientToken=str(uuid.uuid4()),
-            model={"bedrockModelConfig": {"modelId": body.model, "maxTokens": 4096}},
-            maxIterations=10, maxTokens=8192, timeoutSeconds=300, tags={"Project": "ai-portal", "Owner": "portal"})
-        if system:
-            params["systemPrompt"] = system
+            model={"bedrockModelConfig": {"modelId": body.model, "maxTokens": get_max_output_tokens(body.model)}},
+            maxIterations=HARNESS_MAX_ITERATIONS, maxTokens=HARNESS_MAX_TOKENS,
+            timeoutSeconds=HARNESS_TIMEOUT_SECONDS,
+            environmentVariables=harness_environment(),
+            tags={"Project": "ai-portal", "Owner": "portal"})
+        params["systemPrompt"] = system
         if tools:
             params["tools"] = tools
         if skills:
